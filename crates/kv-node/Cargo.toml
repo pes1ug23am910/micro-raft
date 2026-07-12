@@ -1,0 +1,18 @@
+[package]
+name = "kv-node"
+description = "micro-raft node binary: the real driver (tokio/TCP/axum/disk) around raft-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Runtime dependencies cover transport, serialization, logging, CLI parsing,
+# and OS-generated node seeds; add an HTTP dependency only with an HTTP API.
+[dependencies]
+raft-core = { path = "../raft-core" }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

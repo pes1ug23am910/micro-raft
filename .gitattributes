@@ -1,0 +1,2 @@
+# LF everywhere keeps log.jsonl byte offsets and CRCs stable across checkouts.
+* text=auto eol=lf

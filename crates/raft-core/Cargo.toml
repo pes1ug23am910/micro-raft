@@ -1,0 +1,13 @@
+[package]
+name = "raft-core"
+description = "Pure, deterministic Raft state machine (sans-I/O): inputs in, effects out"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Keep the pure core dependency surface limited to serialization derives.
+[dependencies]
+serde = { workspace = true }

@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["crates/kv-node", "crates/raft-core", "crates/sim"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Deny warnings workspace-wide so every crate is held to the same standard.
+[workspace.lints.rust]
+warnings = "deny"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }

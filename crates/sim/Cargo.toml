@@ -1,0 +1,13 @@
+[package]
+name = "sim"
+description = "Deterministic fault-injection simulator for raft-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Keep the simulator deterministic and lightweight: raft-core plus std only.
+[dependencies]
+raft-core = { path = "../raft-core" }
