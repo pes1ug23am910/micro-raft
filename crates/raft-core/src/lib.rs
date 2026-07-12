@@ -18,6 +18,7 @@ pub mod replication;
 pub mod rng;
 pub mod types;
 
+pub use election::{decide_vote, RequestVoteRq};
 pub use message::{Effect, Input, RaftMessage};
 pub use types::{Command, Entry, HardState, LogIndex, NodeId, Role, Term};
 
@@ -47,19 +48,13 @@ pub struct RaftNode {
     pub last_applied: LogIndex,
     pub role: Role,
     // -- timing, all in logical milliseconds fed via Tick (core-owned; D-000) --
-    // M3: these four fields are written at construction but only read once
-    // election timing lands; the `allow`s disappear with the M3 diff.
-    #[allow(dead_code)]
-    now_ms: u64,
-    /// When to start/restart an election.
-    #[allow(dead_code)]
-    election_deadline_ms: u64,
-    /// Leader only: when to send the next heartbeats.
-    #[allow(dead_code)]
-    heartbeat_due_ms: u64,
+    pub(crate) now_ms: u64,
+    /// When to start/restart an election (R5). 0 = not yet drawn (first Tick).
+    pub(crate) election_deadline_ms: u64,
+    /// Leader only: when to send the next heartbeats (R17).
+    pub(crate) heartbeat_due_ms: u64,
     /// Seeded at construction; the ONLY randomness in the core.
-    #[allow(dead_code)]
-    rng: Pcg32,
+    pub(crate) rng: Pcg32,
 }
 
 impl RaftNode {
@@ -75,7 +70,7 @@ impl RaftNode {
             last_applied: 0,
             role: Role::Follower,
             now_ms: 0,
-            // M3: real deadlines are drawn from `rng` on the first Tick.
+            // The real deadline is drawn from `rng` on the first Tick.
             election_deadline_ms: 0,
             heartbeat_due_ms: 0,
             rng: Pcg32::new(seed),
@@ -83,12 +78,143 @@ impl RaftNode {
     }
 
     /// Feed one input; get back an ordered list of effects the driver must
-    /// execute — in the exact order emitted (§2.4 contract).
-    ///
-    /// M2 stub: returns no effects so the real driver loop can run (§4/M2
-    /// deliverable 4). M3: elections & timing (R2–R3, R5–R11). M4:
-    /// replication & commit (R12–R20).
-    pub fn step(&mut self, _input: Input) -> Vec<Effect> {
-        Vec::new()
+    /// execute — in the exact order emitted (§2.4 contract: every `Persist*`
+    /// precedes the `Send`s that depend on it).
+    pub fn step(&mut self, input: Input) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        match input {
+            Input::Tick { now_ms } => self.on_tick(now_ms, &mut effects),
+            Input::Message { from, msg } => self.on_message(from, msg, &mut effects),
+            Input::ClientPropose { .. } => {
+                // M4: R20 (leader append + ProposeAccepted; follower hint).
+                effects.push(Effect::ProposeRejected { leader_hint: None });
+            }
+        }
+        effects
+    }
+
+    fn on_tick(&mut self, now_ms: u64, effects: &mut Vec<Effect>) {
+        self.now_ms = now_ms;
+        // First tick after boot: draw the initial randomized deadline (D-000).
+        if self.election_deadline_ms == 0 {
+            self.reset_election_deadline();
+        }
+        match self.role {
+            // R5: a Leader ignores the election deadline.
+            Role::Leader { .. } => {
+                if self.heartbeat_due_ms <= now_ms {
+                    self.send_append_entries(effects); // R17
+                    self.heartbeat_due_ms = now_ms + HEARTBEAT_MS;
+                }
+            }
+            // R5: a Follower or Candidate whose deadline passes campaigns.
+            Role::Follower | Role::Candidate { .. } => {
+                if now_ms >= self.election_deadline_ms {
+                    self.start_election(effects); // R8
+                }
+            }
+        }
+    }
+
+    fn on_message(&mut self, from: NodeId, msg: RaftMessage, effects: &mut Vec<Effect>) {
+        let msg_term = match &msg {
+            RaftMessage::RequestVote { term, .. }
+            | RaftMessage::RequestVoteReply { term, .. }
+            | RaftMessage::AppendEntries { term, .. }
+            | RaftMessage::AppendEntriesReply { term, .. } => *term,
+        };
+        // R2: any message (request OR reply) with a newer term — adopt it,
+        // clear the vote, convert to Follower, persist — all BEFORE the
+        // message content is processed.
+        if msg_term > self.hard.current_term {
+            self.hard.current_term = msg_term;
+            self.hard.voted_for = None;
+            self.become_follower(effects);
+            effects.push(Effect::PersistHardState(self.hard.clone()));
+        }
+        match msg {
+            RaftMessage::RequestVote {
+                term,
+                candidate_id,
+                last_log_index,
+                last_log_term,
+            } => self.on_request_vote(term, candidate_id, last_log_index, last_log_term, effects),
+            RaftMessage::RequestVoteReply { term, vote_granted } => {
+                self.on_request_vote_reply(from, term, vote_granted, effects);
+            }
+            RaftMessage::AppendEntries {
+                term,
+                leader_id,
+                prev_log_index,
+                prev_log_term,
+                entries,
+                leader_commit,
+            } => self.on_append_entries(
+                term,
+                leader_id,
+                prev_log_index,
+                prev_log_term,
+                entries,
+                leader_commit,
+                effects,
+            ),
+            RaftMessage::AppendEntriesReply {
+                term,
+                success,
+                match_index,
+            } => self.on_append_entries_reply(from, term, success, match_index),
+        }
+    }
+
+    /// R7: on becoming Follower for any reason, candidate/leader-only state
+    /// is dropped with the role. Emits `RoleChanged` only on a real change.
+    pub(crate) fn become_follower(&mut self, effects: &mut Vec<Effect>) {
+        if !matches!(self.role, Role::Follower) {
+            self.role = Role::Follower;
+            effects.push(Effect::RoleChanged {
+                role_name: "Follower",
+                term: self.hard.current_term,
+            });
+        }
+    }
+
+    /// R6: the deadline is reset in EXACTLY three situations — (a) granting a
+    /// vote, (b) accepting AppendEntries from the current leader, (c) starting
+    /// an election. Callers are those three sites (plus first-boot draw).
+    pub(crate) fn reset_election_deadline(&mut self) {
+        self.election_deadline_ms =
+            self.now_ms + self.rng.range_inclusive(ELECTION_MIN_MS, ELECTION_MAX_MS);
+    }
+
+    pub(crate) fn last_log_index(&self) -> LogIndex {
+        self.log.last().map_or(0, |e| e.index)
+    }
+
+    pub(crate) fn last_log_term(&self) -> Term {
+        self.log.last().map_or(0, |e| e.term)
+    }
+
+    /// Explicit convention (§4/M4): `term_at(0) == 0` — "before the log".
+    pub(crate) fn term_at(&self, index: LogIndex) -> Term {
+        if index == 0 {
+            return 0;
+        }
+        self.log.get(usize::try_from(index - 1).expect("log index fits usize"))
+            .map_or(0, |e| e.term)
+    }
+
+    /// Strict majority of the whole cluster (2 of 3, 3 of 5).
+    pub(crate) fn majority(&self) -> usize {
+        let cluster_size = self.peers.len() + 1;
+        cluster_size / 2 + 1
+    }
+
+    /// Read-only introspection for tests/logging (the field stays core-owned).
+    pub fn election_deadline(&self) -> u64 {
+        self.election_deadline_ms
+    }
+
+    pub fn is_leader(&self) -> bool {
+        matches!(self.role, Role::Leader { .. })
     }
 }
