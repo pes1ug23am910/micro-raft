@@ -84,9 +84,11 @@ impl RaftNode {
 
     /// Feed one input; get back an ordered list of effects the driver must
     /// execute — in the exact order emitted (§2.4 contract).
+    ///
+    /// M2 stub: returns no effects so the real driver loop can run (§4/M2
+    /// deliverable 4). M3: elections & timing (R2–R3, R5–R11). M4:
+    /// replication & commit (R12–R20).
     pub fn step(&mut self, _input: Input) -> Vec<Effect> {
-        // M3: elections & timing (R2–R3, R5–R11) land here.
-        // M4: replication & commit (R12–R20) land here.
-        todo!("raft-core logic arrives in M3 (elections) and M4 (replication)")
+        Vec::new()
     }
 }

@@ -3,5 +3,6 @@
 //! tests drive these modules directly.
 
 pub mod crc;
+pub mod driver;
 pub mod storage;
 pub mod transport;

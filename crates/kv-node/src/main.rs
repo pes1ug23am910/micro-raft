@@ -1,7 +1,7 @@
-//! micro-raft node binary — M0: parse config, log it, idle.
+//! micro-raft node binary: CLI wrapper around the kv-node driver.
 //!
-//! M2: the driver loop (tick → step → execute effects) and TCP transport.
-//! M7: the axum HTTP client API.
+//! M2: real TCP transport + the §2.5 driver loop over a stub core.
+//! M3: the core comes alive (elections). M7: the axum HTTP client API.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -52,6 +52,11 @@ struct Config {
     /// Raft peer-to-peer TCP port (listening from M2).
     #[arg(long)]
     raft_port: u16,
+
+    /// TEMPORARY (M2, removed in M3): send a 1 Hz no-op message to each peer
+    /// so the cluster wiring is observable in logs.
+    #[arg(long)]
+    ping: bool,
 }
 
 fn validate(cfg: &Config) -> Result<(), String> {
@@ -123,7 +128,22 @@ async fn main() {
     for p in &cfg.peers {
         info!(peer_id = p.id, peer_addr = %p.addr, "peer configured");
     }
-    // M2: the driver loop replaces this idle.
-    info!("scaffold node idling (M0); press Ctrl+C to exit");
-    std::future::pending::<()>().await;
+
+    let (inbound_tx, inbound_rx) = tokio::sync::mpsc::unbounded_channel();
+    match kv_node::transport::spawn_listener(cfg.raft_port, inbound_tx).await {
+        // The accept-loop task keeps running when its handle drops.
+        Ok(_handle) => info!(raft_port = cfg.raft_port, "raft listener bound on 127.0.0.1"),
+        Err(e) => {
+            tracing::error!(port = cfg.raft_port, "failed to bind raft port: {e}");
+            std::process::exit(1);
+        }
+    }
+    let peer_addrs: Vec<(NodeId, SocketAddr)> = cfg.peers.iter().map(|p| (p.id, p.addr)).collect();
+    let transport = kv_node::transport::TcpTransport::spawn(cfg.id, &peer_addrs);
+    let peer_ids: Vec<NodeId> = cfg.peers.iter().map(|p| p.id).collect();
+    // M3: the seed comes from `rand` (the §2.2-sanctioned seed-gen use) and is
+    // logged so any run can be replayed; the stub core ignores it until then.
+    let node = raft_core::RaftNode::new(cfg.id, peer_ids, u64::from(cfg.id));
+    info!(ping = cfg.ping, "driver starting");
+    kv_node::driver::run_driver(node, transport, inbound_rx, cfg.ping).await;
 }
