@@ -52,11 +52,6 @@ struct Config {
     /// Raft peer-to-peer TCP port (listening from M2).
     #[arg(long)]
     raft_port: u16,
-
-    /// TEMPORARY (M2, removed in M3): send a 1 Hz no-op message to each peer
-    /// so the cluster wiring is observable in logs.
-    #[arg(long)]
-    ping: bool,
 }
 
 fn validate(cfg: &Config) -> Result<(), String> {
@@ -141,9 +136,10 @@ async fn main() {
     let peer_addrs: Vec<(NodeId, SocketAddr)> = cfg.peers.iter().map(|p| (p.id, p.addr)).collect();
     let transport = kv_node::transport::TcpTransport::spawn(cfg.id, &peer_addrs);
     let peer_ids: Vec<NodeId> = cfg.peers.iter().map(|p| p.id).collect();
-    // M3: the seed comes from `rand` (the §2.2-sanctioned seed-gen use) and is
-    // logged so any run can be replayed; the stub core ignores it until then.
-    let node = raft_core::RaftNode::new(cfg.id, peer_ids, u64::from(cfg.id));
-    info!(ping = cfg.ping, "driver starting");
-    kv_node::driver::run_driver(node, transport, inbound_rx, cfg.ping).await;
+    // §2.2: `rand` is sanctioned for seed generation only. The seed is logged
+    // so any real-cluster observation can be discussed against a known value.
+    let seed: u64 = rand::random();
+    let node = raft_core::RaftNode::new(cfg.id, peer_ids, seed);
+    info!(seed, "driver starting");
+    kv_node::driver::run_driver(node, transport, inbound_rx).await;
 }

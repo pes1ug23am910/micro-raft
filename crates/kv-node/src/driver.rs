@@ -3,10 +3,10 @@
 //! throughput. It feeds the core `Input`s and executes the returned `Effect`s
 //! in the exact order emitted.
 //!
-//! M2: the core is a stub (no effects beyond compiling); `--ping` makes the
-//! wiring observable and is removed in M3. M5: `Persist*` effects execute
-//! against `storage` with fsync completing before any later `Send`. M7: the
-//! propose channel and `Apply`/client-response effects join the loop.
+//! M3: the core is live — real elections run over real sockets. M5:
+//! `Persist*` effects execute against `storage` with fsync completing before
+//! any later `Send`. M7: the propose channel and `Apply`/client-response
+//! effects join the loop.
 
 use std::time::Duration;
 
@@ -23,14 +23,10 @@ pub async fn run_driver(
     mut node: RaftNode,
     transport: impl Transport,
     mut inbound_rx: mpsc::UnboundedReceiver<(NodeId, RaftMessage)>,
-    ping: bool,
 ) {
     let started = tokio::time::Instant::now();
     let mut tick = tokio::time::interval(Duration::from_millis(TICK_MS));
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    // M2 --ping only; removed in M3 when real heartbeats exist.
-    let mut ping_interval = tokio::time::interval(Duration::from_secs(1));
-    let peers: Vec<NodeId> = node.peers.clone();
 
     let mut inputs: Vec<Input> = Vec::new();
     loop {
@@ -41,12 +37,6 @@ pub async fn run_driver(
             Some((from, msg)) = inbound_rx.recv() => {
                 debug!(from, ?msg, "message received");
                 inputs.push(Input::Message { from, msg });
-            }
-            _ = ping_interval.tick(), if ping => {
-                for &p in &peers {
-                    transport.send(p, RaftMessage::RequestVoteReply { term: 0, vote_granted: false });
-                }
-                debug!("ping sent to all peers");
             }
             // M7: propose_rx (client commands) joins this select.
         }
