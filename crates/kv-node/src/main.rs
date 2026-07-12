@@ -3,6 +3,13 @@
 //! M2: the driver loop (tick → step → execute effects) and TCP transport.
 //! M7: the axum HTTP client API.
 
+// M5: storage (and its CRC framing) is wired into the driver's effect
+// executor; until then these modules are exercised only by their tests.
+#[allow(dead_code)]
+mod crc;
+#[allow(dead_code)]
+mod storage;
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
