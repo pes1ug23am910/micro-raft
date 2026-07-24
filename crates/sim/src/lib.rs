@@ -15,9 +15,12 @@ pub mod invariants;
 use std::collections::{BTreeMap, BTreeSet};
 
 use raft_core::rng::Pcg32;
-use raft_core::{Effect, Entry, HardState, Input, NodeId, RaftMessage, RaftNode, Role, Term, TICK_MS};
+use raft_core::{
+    Command, Effect, Entry, HardState, Input, LogIndex, NodeId, RaftMessage, RaftNode, Role, Term,
+    TICK_MS,
+};
 
-use invariants::Invariants;
+use invariants::{CommittedRegistry, Invariants};
 
 /// Multiplier for deriving per-node seeds from the master seed (§4/M3).
 /// The spec's `seed ^ node_id * 0x9E3779B97F4A7C15` requires wrapping
@@ -52,13 +55,19 @@ impl Default for FaultConfig {
 
 struct SimNode {
     core: RaftNode,
-    /// M5: crash/restart. In M3 every node stays alive.
+    /// M5: crash/restart. In M3–M4 every node stays alive.
     alive: bool,
     /// Virtual disk — updated ONLY when a `Persist*` effect executes.
     disk_hard: HardState,
     disk_log: Vec<Entry>,
     /// For TermMonotonicity.
     last_term_seen: Term,
+    /// Applied-command history (M4): every `Effect::Apply` this node ever
+    /// executed, in order — the raw material for StateMachineSafety.
+    applied: Vec<(LogIndex, Command)>,
+    /// High-water mark of what this node has recorded into the
+    /// CommittedRegistry while Leader (M4).
+    registered_commit: LogIndex,
 }
 
 struct Envelope {
@@ -79,6 +88,9 @@ pub struct Sim {
     rng: Pcg32,
     pub faults: FaultConfig,
     invariants: Invariants,
+    /// Every entry ever committed by a leader in its own term (M4) — the
+    /// ground truth LeaderCompleteness/CommittedDurability checks against.
+    committed: CommittedRegistry,
 }
 
 impl Sim {
@@ -95,6 +107,8 @@ impl Sim {
                     disk_hard: HardState::default(),
                     disk_log: Vec::new(),
                     last_term_seen: 0,
+                    applied: Vec::new(),
+                    registered_commit: 0,
                 },
             );
         }
@@ -107,6 +121,7 @@ impl Sim {
             rng: Pcg32::new(seed),
             faults: FaultConfig::default(),
             invariants: Invariants::default(),
+            committed: CommittedRegistry::default(),
         }
     }
 
@@ -157,6 +172,7 @@ impl Sim {
     }
 
     fn execute_effects(&mut self, origin: NodeId, effects: Vec<Effect>) {
+        let mut log_changed = false;
         for effect in effects {
             match effect {
                 Effect::PersistHardState(hs) => {
@@ -171,16 +187,68 @@ impl Sim {
                         disk.retain(|e| e.index < from);
                     }
                     disk.extend(entries);
+                    log_changed = true;
                 }
                 Effect::Send { to, msg } => self.enqueue(origin, to, msg),
                 Effect::RoleChanged { role_name, term } => {
                     if role_name == "Leader" {
                         self.invariants.on_leader_elected(self.seed, term, origin);
+                        // LeaderCompleteness/CommittedDurability v1: every
+                        // entry ever committed must already be in the log of
+                        // every subsequent leader — checked the moment one
+                        // is elected.
+                        let log = &self.nodes.get(&origin).expect("origin exists").core.log;
+                        self.committed
+                            .assert_all_in_leader_log(self.seed, origin, term, log);
                     }
                 }
-                // M4: Apply → per-node applied histories (StateMachineSafety);
-                // ProposeAccepted/Rejected → client bookkeeping.
-                Effect::Apply(_) | Effect::ProposeAccepted { .. } | Effect::ProposeRejected { .. } => {}
+                Effect::Apply(entry) => self.on_apply(origin, entry),
+                // Client acks/rejections have no world to act on here; tests
+                // inspect them via the effect copies `propose` returns.
+                Effect::ProposeAccepted { .. } | Effect::ProposeRejected { .. } => {}
+            }
+        }
+        // LogMatching is asserted every step; a step that changed no log
+        // cannot newly violate it, so the check runs exactly when the
+        // origin's log changed (every core mutation emits PersistLogEntries).
+        if log_changed {
+            let origin_log = &self.nodes.get(&origin).expect("origin exists").core.log;
+            for (&other, node) in &self.nodes {
+                if other != origin {
+                    invariants::check_log_matching(
+                        self.seed,
+                        origin,
+                        origin_log,
+                        other,
+                        &node.core.log,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Execute one `Apply` into the virtual world: record it in the node's
+    /// history (asserting R4's strict ordering) and hold the histories of
+    /// every pair of nodes to StateMachineSafety.
+    fn on_apply(&mut self, origin: NodeId, entry: Entry) {
+        let node = self.nodes.get_mut(&origin).expect("origin exists");
+        let expected = node.applied.last().map_or(1, |&(i, _)| i + 1);
+        assert_eq!(
+            entry.index, expected,
+            "seed={}: R4 violated — n{origin} applied index {} but expected {expected}",
+            self.seed, entry.index
+        );
+        node.applied.push((entry.index, entry.command));
+        let origin_applied = &self.nodes.get(&origin).expect("origin exists").applied;
+        for (&other, node) in &self.nodes {
+            if other != origin {
+                invariants::check_applied_agreement(
+                    self.seed,
+                    origin,
+                    origin_applied,
+                    other,
+                    &node.applied,
+                );
             }
         }
     }
@@ -221,6 +289,21 @@ impl Sim {
             node.core.hard.current_term,
         );
         node.last_term_seen = node.core.hard.current_term;
+        // CommittedRegistry: commitment is DEFINED where R19 runs — on a
+        // leader advancing commit_index in its own term. Record the newly
+        // covered entries the moment it happens (this runs right after
+        // every step of every node).
+        if node.core.is_leader() && node.core.commit_index > node.registered_commit {
+            for i in (node.registered_commit + 1)..=node.core.commit_index {
+                let entry = node
+                    .core
+                    .log
+                    .get(usize::try_from(i - 1).expect("log index fits usize"))
+                    .expect("commit_index never passes the log end (R19)");
+                self.committed.record(self.seed, entry);
+            }
+            node.registered_commit = node.core.commit_index;
+        }
     }
 
     // ---- accessors & test seams -------------------------------------------
@@ -288,6 +371,47 @@ impl Sim {
         node.last_term_seen = hs.current_term;
         node.core.hard = hs.clone();
         node.disk_hard = hs;
+    }
+
+    /// A client PUT delivered to `node` as a `ClientPropose` input (§4/M4).
+    /// Returns a copy of the emitted effects so tests can inspect the
+    /// `ProposeAccepted` / `ProposeRejected` outcome.
+    pub fn client_put(&mut self, node: NodeId, key: &str, value: &str) -> Vec<Effect> {
+        self.propose(
+            node,
+            Command::Put {
+                key: key.to_string(),
+                value: value.to_string(),
+            },
+        )
+    }
+
+    /// A client DELETE delivered to `node` as a `ClientPropose` input (§4/M4).
+    pub fn client_delete(&mut self, node: NodeId, key: &str) -> Vec<Effect> {
+        self.propose(node, Command::Delete { key: key.to_string() })
+    }
+
+    fn propose(&mut self, id: NodeId, command: Command) -> Vec<Effect> {
+        let node = self.nodes.get_mut(&id).expect("known node id");
+        if !node.alive {
+            return Vec::new(); // M5: proposals to a crashed node go nowhere
+        }
+        let effects = node.core.step(Input::ClientPropose { command });
+        let copy = effects.clone();
+        self.execute_effects(id, effects);
+        self.check_node_invariants(id);
+        copy
+    }
+
+    /// This node's applied-command history, in application order (M4).
+    pub fn applied(&self, id: NodeId) -> &[(LogIndex, Command)] {
+        &self.nodes.get(&id).expect("known node id").applied
+    }
+
+    /// The committed-entry registry (M4) — every entry a leader ever
+    /// committed in its own term.
+    pub fn registry(&self) -> &CommittedRegistry {
+        &self.committed
     }
 
     /// Test seam: deliver a message immediately, bypassing the virtual
