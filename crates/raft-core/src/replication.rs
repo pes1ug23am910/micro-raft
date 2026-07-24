@@ -11,6 +11,36 @@ use crate::message::{Effect, RaftMessage};
 use crate::types::{Command, Entry, LogIndex, NodeId, Role, Term};
 use crate::RaftNode;
 
+/// R19 as a pure function (the Gate 2 hand-diff target, like `decide_vote`
+/// was for Gate 1).
+///
+/// `match_indexes` carries one replication watermark per cluster member —
+/// the leader's own log length included. Returns the largest `N > current`
+/// such that (a) a strict majority of the cluster has `match >= N`, AND
+/// (b) `log[N].term == current_term`. Condition (b) is Figure 8's lesson and
+/// is not optional: majority replication of a *prior-term* entry alone must
+/// never advance the commit index — older entries commit only as a side
+/// effect of a current-term entry committing above them (R19b).
+pub fn commit_advance(
+    current: LogIndex,
+    current_term: Term,
+    log: &[Entry],
+    match_indexes: &[LogIndex],
+) -> Option<LogIndex> {
+    let majority = match_indexes.len() / 2 + 1;
+    let mut n = log.last().map_or(0, |e| e.index);
+    while n > current {
+        let replicated = match_indexes.iter().filter(|&&m| m >= n).count();
+        if replicated >= majority
+            && log[usize::try_from(n - 1).expect("log index fits usize")].term == current_term
+        {
+            return Some(n);
+        }
+        n -= 1;
+    }
+    None
+}
+
 impl RaftNode {
     /// R17: to every peer, the entries from `next_index[p]` onward (empty =
     /// pure heartbeat), anchored at `prev_log_index/term`. Entries piggyback
@@ -168,18 +198,108 @@ impl RaftNode {
         }
     }
 
-    /// M3: only the stale-reply guard (R3). M4: R18 bookkeeping + R19 commit.
+    /// R18: success raises this peer's watermark monotonically and probes
+    /// commit advancement (R19); failure walks `next_index` back — hint-
+    /// accelerated, floored at 1, with plain decrement as the guaranteed-
+    /// terminating fallback. Retry rides the next heartbeat (R17).
     pub(crate) fn on_append_entries_reply(
         &mut self,
-        _from: NodeId,
+        from: NodeId,
         term: Term,
-        _success: bool,
-        _match_index: LogIndex,
+        success: bool,
+        match_index: LogIndex,
+        effects: &mut Vec<Effect>,
     ) {
+        // R3: stale replies — an older term, or arriving in a role that no
+        // longer expects them — must not mutate current bookkeeping. A slow
+        // network cannot be allowed to resurrect dead state.
         if term != self.hard.current_term {
-            // R3: stale replies are dropped — a slow network must not be able
-            // to resurrect dead bookkeeping.
+            return;
         }
-        // M4: match_index/next_index updates (R18) and commit advancement (R19).
+        let own_last = self.last_log_index();
+        let advanced = {
+            let Role::Leader {
+                next_index,
+                match_index: peer_match,
+            } = &mut self.role
+            else {
+                return;
+            };
+            let (Some(next), Some(matched)) = (next_index.get_mut(&from), peer_match.get_mut(&from))
+            else {
+                return; // not a peer of this cluster
+            };
+            if success {
+                // R18: monotone — a duplicate or reordered success can never
+                // move the watermark backwards.
+                *matched = (*matched).max(match_index);
+                *next = *matched + 1;
+                // R19: the leader counts itself via its own log length.
+                let mut all: Vec<LogIndex> = peer_match.values().copied().collect();
+                all.push(own_last);
+                commit_advance(self.commit_index, self.hard.current_term, &self.log, &all)
+            } else {
+                *next = 1.max((*next - 1).min(match_index + 1));
+                None
+            }
+        };
+        if let Some(n) = advanced {
+            self.commit_index = n;
+            self.apply_committed(effects); // R4
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn log(terms: &[Term]) -> Vec<Entry> {
+        terms
+            .iter()
+            .enumerate()
+            .map(|(i, &term)| Entry {
+                index: i as u64 + 1,
+                term,
+                command: Command::NoOp,
+            })
+            .collect()
+    }
+
+    /// R19b's load-bearing clause: a majority-replicated PRIOR-term entry
+    /// must never advance the commit index by count alone — the Figure 8
+    /// disaster. It commits only underneath a current-term entry.
+    #[test]
+    fn commit_advance_blocks_prior_term_majority() {
+        // Term-4 leader; idx 2 (term 2) sits on a majority (self=3, 2, 0);
+        // idx 3 is the leader's own term-4 NoOp.
+        let l = log(&[1, 2, 4]);
+        // NoOp not yet on a majority: only the prior-term entry is.
+        assert_eq!(commit_advance(0, 4, &l, &[3, 2, 0]), None);
+        // The moment the term-4 entry reaches a majority, everything below
+        // commits with it — carried, not counted.
+        assert_eq!(commit_advance(0, 4, &l, &[3, 3, 0]), Some(3));
+    }
+
+    /// R19a: a strict majority of the CLUSTER (leader included) — half is
+    /// not enough, and the bar is ⌊n/2⌋+1 for even and odd cluster sizes.
+    #[test]
+    fn commit_advance_requires_strict_majority() {
+        let l = log(&[1, 1, 1]);
+        // 5-node cluster: 2 of 5 at index 3 is not a majority...
+        assert_eq!(commit_advance(0, 1, &l, &[3, 3, 0, 0, 0]), None);
+        // ...3 of 5 is.
+        assert_eq!(commit_advance(0, 1, &l, &[3, 3, 3, 0, 0]), Some(3));
+    }
+
+    /// R19 takes the LARGEST qualifying N, and returns None when nothing
+    /// above `current` qualifies (no regression, no busywork).
+    #[test]
+    fn commit_advance_takes_largest_qualifying_n() {
+        let l = log(&[1, 1, 1, 1]);
+        // Majority holds up to 3; one straggler at 4.
+        assert_eq!(commit_advance(1, 1, &l, &[4, 3, 3]), Some(3));
+        // Already committed there: nothing new.
+        assert_eq!(commit_advance(3, 1, &l, &[4, 3, 3]), None);
     }
 }

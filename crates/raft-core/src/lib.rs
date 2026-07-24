@@ -20,6 +20,7 @@ pub mod types;
 
 pub use election::{decide_vote, RequestVoteRq};
 pub use message::{Effect, Input, RaftMessage};
+pub use replication::commit_advance;
 pub use types::{Command, Entry, HardState, LogIndex, NodeId, Role, Term};
 
 use rng::Pcg32;
@@ -164,7 +165,7 @@ impl RaftNode {
                 term,
                 success,
                 match_index,
-            } => self.on_append_entries_reply(from, term, success, match_index),
+            } => self.on_append_entries_reply(from, term, success, match_index, effects),
         }
     }
 
