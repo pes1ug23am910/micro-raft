@@ -47,6 +47,10 @@ pub struct RaftNode {
     /// Volatile (R1: rebuilt as 0 on every boot).
     pub last_applied: LogIndex,
     pub role: Role,
+    /// The `leader_id` of the most recent valid-term `AppendEntries` — the
+    /// "last known leader" R20 serves as `ProposeRejected`'s hint. Best-effort
+    /// by design: never cleared, only overwritten by a fresher sighting.
+    pub(crate) leader_hint: Option<NodeId>,
     // -- timing, all in logical milliseconds fed via Tick (core-owned; D-000) --
     pub(crate) now_ms: u64,
     /// When to start/restart an election (R5). 0 = not yet drawn (first Tick).
@@ -69,6 +73,7 @@ impl RaftNode {
             commit_index: 0,
             last_applied: 0,
             role: Role::Follower,
+            leader_hint: None,
             now_ms: 0,
             // The real deadline is drawn from `rng` on the first Tick.
             election_deadline_ms: 0,
@@ -85,10 +90,7 @@ impl RaftNode {
         match input {
             Input::Tick { now_ms } => self.on_tick(now_ms, &mut effects),
             Input::Message { from, msg } => self.on_message(from, msg, &mut effects),
-            Input::ClientPropose { .. } => {
-                // M4: R20 (leader append + ProposeAccepted; follower hint).
-                effects.push(Effect::ProposeRejected { leader_hint: None });
-            }
+            Input::ClientPropose { command } => self.on_client_propose(command, &mut effects),
         }
         effects
     }

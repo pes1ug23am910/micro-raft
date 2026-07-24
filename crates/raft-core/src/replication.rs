@@ -8,20 +8,24 @@
 //! client proposals (R20), and the leader NoOp completing R16.
 
 use crate::message::{Effect, RaftMessage};
-use crate::types::{Entry, LogIndex, NodeId, Role, Term};
+use crate::types::{Command, Entry, LogIndex, NodeId, Role, Term};
 use crate::RaftNode;
 
 impl RaftNode {
-    /// R17: to every peer, entries from `next_index[p]` onward with the real
-    /// `prev_log_index/term` anchor. M3: `entries` is always empty — a pure
-    /// heartbeat is enough to HOLD leadership; payloads ride here in M4.
+    /// R17: to every peer, the entries from `next_index[p]` onward (empty =
+    /// pure heartbeat), anchored at `prev_log_index/term`. Entries piggyback
+    /// on the heartbeat cadence rather than being pushed on propose — a
+    /// documented simplification costing at most one HEARTBEAT_MS of latency.
     pub(crate) fn send_append_entries(&mut self, effects: &mut Vec<Effect>) {
         let Role::Leader { next_index, .. } = &self.role else {
             return;
         };
         for &peer in &self.peers {
-            let prev_log_index = next_index.get(&peer).map_or(self.last_log_index(), |&n| n - 1);
+            let next = next_index.get(&peer).map_or(self.last_log_index() + 1, |&n| n);
+            let prev_log_index = next - 1;
             let prev_log_term = self.term_at(prev_log_index);
+            let from = usize::try_from(prev_log_index).expect("log index fits usize");
+            let entries = self.log.get(from..).map_or_else(Vec::new, <[Entry]>::to_vec);
             effects.push(Effect::Send {
                 to: peer,
                 msg: RaftMessage::AppendEntries {
@@ -29,12 +33,37 @@ impl RaftNode {
                     leader_id: self.id,
                     prev_log_index,
                     prev_log_term,
-                    // M4: log[next_index[peer]..] rides along here.
-                    entries: Vec::new(),
+                    entries,
                     leader_commit: self.commit_index,
                 },
             });
         }
+    }
+
+    /// R20: a Leader appends the command at the next index in its own term,
+    /// persists it, and acknowledges with the assigned index — replication
+    /// then rides the next heartbeat (R17). Anyone else refuses, hinting at
+    /// the last known leader so the client can retry there.
+    pub(crate) fn on_client_propose(&mut self, command: Command, effects: &mut Vec<Effect>) {
+        if !matches!(self.role, Role::Leader { .. }) {
+            effects.push(Effect::ProposeRejected {
+                leader_hint: self.leader_hint,
+            });
+            return;
+        }
+        let entry = Entry {
+            index: self.last_log_index() + 1,
+            term: self.hard.current_term,
+            command,
+        };
+        self.log.push(entry.clone());
+        // §2.4 contract: the persist precedes the accept — nothing may act on
+        // an entry the leader itself hasn't made durable.
+        effects.push(Effect::PersistLogEntries {
+            truncate_from: None,
+            entries: vec![entry.clone()],
+        });
+        effects.push(Effect::ProposeAccepted { index: entry.index });
     }
 
     /// M3 follower half: timing + role rules only (R6b, R11, R3).
@@ -68,6 +97,8 @@ impl RaftNode {
         // R6b: ANY AppendEntries from the current leader resets the election
         // timer — including, in M4, one whose consistency check fails.
         self.reset_election_deadline();
+        // R20: this sender is the freshest leader sighting we have.
+        self.leader_hint = Some(leader_id);
         // M4: R12/R13/R14 land here; the persist effect precedes this reply.
         effects.push(Effect::Send {
             to: leader_id,

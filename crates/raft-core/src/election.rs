@@ -4,7 +4,7 @@
 //! `decide_vote` stays pure so its vote rule can be tested independently.
 
 use crate::message::{Effect, RaftMessage};
-use crate::types::{HardState, LogIndex, NodeId, Role, Term};
+use crate::types::{Command, Entry, HardState, LogIndex, NodeId, Role, Term};
 use crate::{RaftNode, HEARTBEAT_MS};
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -141,9 +141,11 @@ impl RaftNode {
         }
     }
 
-    /// R16 (election half — the NoOp/log half lands in M4): initialize
-    /// per-peer replication state, then heartbeat immediately so the claim
-    /// on the term goes out on this very step.
+    /// R16: initialize per-peer replication state anchored to the PRE-NoOp
+    /// last index, immediately append + persist the current-term NoOp, then
+    /// heartbeat on this very step — so the NoOp rides the first
+    /// AppendEntries out. The NoOp is what lets R19(b) commit something from
+    /// this term promptly, unlocking everything before it (Figure 8).
     pub(crate) fn become_leader(&mut self, effects: &mut Vec<Effect>) {
         let next = self.last_log_index() + 1;
         let mut next_index = BTreeMap::new();
@@ -156,11 +158,21 @@ impl RaftNode {
             next_index,
             match_index,
         };
+        let noop = Entry {
+            index: next,
+            term: self.hard.current_term,
+            command: Command::NoOp,
+        };
+        self.log.push(noop.clone());
+        // §2.4 contract: the append's persist precedes the Sends that carry it.
+        effects.push(Effect::PersistLogEntries {
+            truncate_from: None,
+            entries: vec![noop],
+        });
         effects.push(Effect::RoleChanged {
             role_name: "Leader",
             term: self.hard.current_term,
         });
-        // M4: R16's NoOp entry + PersistLogEntries are appended here.
         self.send_append_entries(effects);
         self.heartbeat_due_ms = self.now_ms + HEARTBEAT_MS;
     }
