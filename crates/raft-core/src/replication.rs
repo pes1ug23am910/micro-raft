@@ -66,17 +66,18 @@ impl RaftNode {
         effects.push(Effect::ProposeAccepted { index: entry.index });
     }
 
-    /// M3 follower half: timing + role rules only (R6b, R11, R3).
-    /// M4: R12 consistency check, R13 conflict repair, R14 commit update.
+    /// The follower's accept path: R12 consistency check, R13 conflict
+    /// repair + append, R14 commit update, R4 apply — after the M3 rules
+    /// (R3 stale rejection, R11 candidate step-down, R6b timing).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn on_append_entries(
         &mut self,
         term: Term,
         leader_id: NodeId,
         prev_log_index: LogIndex,
-        _prev_log_term: Term,
-        _entries: Vec<Entry>,
-        _leader_commit: LogIndex,
+        prev_log_term: Term,
+        entries: Vec<Entry>,
+        leader_commit: LogIndex,
         effects: &mut Vec<Effect>,
     ) {
         // R3: a stale leader gets the current term and a rejection.
@@ -95,19 +96,76 @@ impl RaftNode {
         // legitimately leads this term. R11: a candidate steps down.
         self.become_follower(effects);
         // R6b: ANY AppendEntries from the current leader resets the election
-        // timer — including, in M4, one whose consistency check fails.
+        // timer — including one whose consistency check fails (R12).
         self.reset_election_deadline();
         // R20: this sender is the freshest leader sighting we have.
         self.leader_hint = Some(leader_id);
-        // M4: R12/R13/R14 land here; the persist effect precedes this reply.
+
+        // R12: the consistency check — do we hold the leader's anchor entry?
+        // Failure still counted the sender as leader above; the reply carries
+        // my log length as a backoff hint for R18's next_index walk.
+        if prev_log_index > 0
+            && (self.last_log_index() < prev_log_index
+                || self.term_at(prev_log_index) != prev_log_term)
+        {
+            effects.push(Effect::Send {
+                to: leader_id,
+                msg: RaftMessage::AppendEntriesReply {
+                    term: self.hard.current_term,
+                    success: false,
+                    match_index: self.last_log_index(),
+                },
+            });
+            return;
+        }
+
+        // R13: walk the payload against the existing log. Truncate ONLY at
+        // the first same-index/different-term conflict — the sole situation
+        // in which entries are ever deleted, and only here, on a non-leader
+        // (R15). Entries already present are skipped, never re-appended, so
+        // a duplicate or reordered AppendEntries can never shrink the log.
+        let entries_len = entries.len() as u64;
+        let mut truncate_from = None;
+        let mut appended = Vec::new();
+        for entry in entries {
+            if entry.index > self.last_log_index() {
+                appended.push(entry); // past my end — genuinely new
+            } else if self.term_at(entry.index) == entry.term {
+                // Same index + same term ⇒ same entry (Log Matching): keep.
+            } else {
+                // First real conflict: everything from here on is wreckage
+                // from a dead leader; cut it and take the leader's suffix.
+                truncate_from = Some(entry.index);
+                self.log
+                    .truncate(usize::try_from(entry.index - 1).expect("log index fits usize"));
+                appended.push(entry);
+            }
+        }
+        if !appended.is_empty() {
+            self.log.extend(appended.iter().cloned());
+            // One persist effect, emitted only because the log changed, and
+            // before the success reply below (§2.4 contract).
+            effects.push(Effect::PersistLogEntries {
+                truncate_from,
+                entries: appended,
+            });
+        }
         effects.push(Effect::Send {
             to: leader_id,
             msg: RaftMessage::AppendEntriesReply {
                 term: self.hard.current_term,
                 success: true,
-                match_index: prev_log_index,
+                match_index: prev_log_index + entries_len,
             },
         });
+
+        // R14: lift commit_index toward the leader's, bounded by what this
+        // RPC covered — never backwards — then apply in order (R4).
+        let new_commit = leader_commit.min(prev_log_index + entries_len);
+        if new_commit > self.commit_index {
+            self.commit_index = new_commit;
+            self.apply_committed(effects);
+        }
     }
 
     /// M3: only the stale-reply guard (R3). M4: R18 bookkeeping + R19 commit.

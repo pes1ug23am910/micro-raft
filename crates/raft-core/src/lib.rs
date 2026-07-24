@@ -196,6 +196,21 @@ impl RaftNode {
         self.log.last().map_or(0, |e| e.term)
     }
 
+    /// R4: whenever `commit_index > last_applied`, emit `Apply` for the next
+    /// unapplied entry and advance — strictly in index order, exactly once
+    /// per boot per index. Runs after every commit_index change (R14, R19).
+    pub(crate) fn apply_committed(&mut self, effects: &mut Vec<Effect>) {
+        while self.commit_index > self.last_applied {
+            self.last_applied += 1;
+            let entry = self
+                .log
+                .get(usize::try_from(self.last_applied - 1).expect("log index fits usize"))
+                .expect("R19/R14 never advance commit_index past the log")
+                .clone();
+            effects.push(Effect::Apply(entry));
+        }
+    }
+
     /// Explicit convention (§4/M4): `term_at(0) == 0` — "before the log".
     pub(crate) fn term_at(&self, index: LogIndex) -> Term {
         if index == 0 {
