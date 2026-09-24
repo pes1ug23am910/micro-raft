@@ -1,70 +1,54 @@
 # micro-raft
 
-A distributed key–value store in Rust implementing the **Raft consensus algorithm from scratch** — no consensus libraries of any kind — running as a 3-node cluster over TCP, and verified by a deterministic fault-injection simulator.
+A Rust implementation of the Raft consensus core, with a deterministic fault-injection simulator, a TCP election driver and standalone storage components.
 
-Written by **Yash Verma**. Every commit in this repository is mine, and the design was defended in written re-derivations at each milestone gate before the next one was allowed to start (see [Authorship and gates](#authorship-and-gates)).
-
-## Why it exists
-
-Most Raft demos stop at "a leader gets elected." The interesting part is everything after: what happens when a follower's log diverges, when a message is dropped mid-replication, when a node crashes with a half-written record on disk. This implementation targets those cases specifically, and proves them with a simulator that can replay any failure deterministically from a seed.
+The project explores leader election, replicated-log consistency and commitment under network failures. The consensus core and simulator implement log replication and application histories. The runnable node currently demonstrates elections over TCP; its persistence effects and client key-value API are not wired into the driver.
 
 ## Architecture
 
-Three crates in a Cargo workspace:
-
 | Crate | Responsibility |
 |---|---|
-| **`raft-core`** | Pure consensus state machine — election, replication, message types, deterministic RNG. No I/O, no clock, no sockets. Every transition is a function of `(state, message)`. |
-| **`kv-node`** | The runnable node — TCP transport with a length-framed codec, durable storage, CRC32 integrity, and the driver that wires the core to the outside world. |
-| **`sim`** | Deterministic virtual-time and virtual-network simulator: injects partitions, message loss and reordering, then asserts safety invariants after every step. |
+| `raft-core` | I/O-free state machine for leader election, log replication and commitment. Inputs include messages, ticks and client proposals; outputs are ordered effects. |
+| `kv-node` | Tokio/TCP transport, command-line configuration and election driver. Storage helpers implement atomic hard-state replacement, CRC32 records and torn-tail recovery, independently of the driver. |
+| `sim` | Seeded virtual time and networking, message loss, partitions, application histories and safety checks. |
 
-The core is deliberately I/O-free. That is what makes the simulator possible: the same `raft-core` that runs against real TCP sockets in `kv-node` runs against a virtual network in `sim`, with a virtual clock, so a failing run is reproducible from its seed rather than from luck.
+## Implemented mechanisms
 
-## What's implemented
+- **Leader election:** randomized timeouts, term advancement, vote eligibility based on log freshness, split-vote recovery and higher-term step-down.
+- **Replication:** previous-index/term checks, conflict-only suffix repair and per-follower replication tracking.
+- **Commitment:** a strict majority must replicate a current-term entry before the leader advances its commit index. Older entries commit through that current-term entry, as required by Raft's Figure 8 scenario.
+- **Ordered effects:** the core emits persistence before dependent replies and applies committed entries in index order. The simulator executes these effects; the TCP driver does not yet execute storage or application effects.
+- **Storage components:** atomic hard-state replacement and checksum-based log recovery, covered by isolated storage tests.
 
-**Leader election** — randomised timeouts, term advancement, vote granting with the up-to-date log check, split-vote recovery, and the step-down paths on discovering a higher term.
+## Tests
 
-**Log replication and commitment** — `AppendEntries` with the previous-index/term consistency check, conflict-only log repair (a follower truncates only where it genuinely diverges), commit-index advancement via match-index quorum, and the apply loop feeding the state machine.
+The workspace contains 32 automated tests, including seven election scenarios and seven replication scenarios. Tests cover divergent-log repair, the Figure 8 commit rule, transport framing/reconnection, CRC32 and storage recovery.
 
-**The Figure 8 rule** — a leader may only advance the commit index on an entry from its *own* term. This is the subtle one that makes naive implementations unsafe, and it's implemented as a pure `commit_advance` function so it can be tested in isolation and compared against a hand-derivation.
+The simulator checks election safety, term monotonicity, log matching and agreement between applied histories. A replication soak runs 20 seeds with three nodes and 10% message loss, followed by fault-free convergence checks. Failures include the seed for reproduction.
 
-**Durability** — hard state (term, vote) is swapped atomically, so a crash mid-write leaves either the old value or the new one, never a torn mix. The log recovers from a torn tail: a partially written trailing record is detected by CRC and discarded rather than being replayed as truth.
-
-## Verification
-
-The simulator asserts these invariants after **every** step, not just at the end:
-
-- **Election Safety** — at most one leader per term
-- **Log Matching** — if two logs contain an entry with the same index and term, all preceding entries are identical
-- **State Machine Safety** — no two nodes ever apply different commands at the same log index
-
-On top of that, named acceptance suites: **7 election scenarios** and **7 replication scenarios**, plus a multi-seed message-loss soak. Unit tests cover storage recovery, the transport frame codec, CRC32 against reference vectors, and the deterministic RNG.
-
-Failures print their seed, so any red run replays exactly.
-
-```bash
+```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-## Running a cluster
+## TCP election demo
 
-```bash
-cargo run -p kv-node -- --id 1 --peers 127.0.0.1:5002,127.0.0.1:5003 --listen 127.0.0.1:5001
+Run each command in a separate terminal:
+
+```sh
+cargo run -p kv-node -- --id 1 --peers 2@127.0.0.1:7102,3@127.0.0.1:7103 --data-dir data/n1 --http-port 8101 --raft-port 7101
+cargo run -p kv-node -- --id 2 --peers 1@127.0.0.1:7101,3@127.0.0.1:7103 --data-dir data/n2 --http-port 8102 --raft-port 7102
+cargo run -p kv-node -- --id 3 --peers 1@127.0.0.1:7101,2@127.0.0.1:7102 --data-dir data/n3 --http-port 8103 --raft-port 7103
 ```
 
-Start three nodes on different ports and they will elect a leader and replicate among themselves.
+These nodes exchange Raft messages and elect a leader. `--data-dir` and `--http-port` are required configuration fields but are not connected to storage or an HTTP service yet. The driver logs unhandled persistence and application effects; it is not a durable key-value service.
 
-## Authorship and gates
+## Scope
 
-This was built as a learning-by-construction project under a rule I set for myself: **no milestone could begin until I had re-derived the previous one in writing, by hand, without reference to the code.** Those written gate submissions are preserved in [`Evidence/`](Evidence/) — they are the record that the consensus logic here is understood rather than merely present.
+Runtime persistence/recovery, client proposal handling, key-value application and HTTP responses remain unfinished. Simulator crash/restart schedules, snapshots, membership changes and client-session deduplication are also outside the implemented scope.
 
-`Evidence/Section-A micro-raft.pdf` and `Evidence/Decide-Vote-rs-2nd-Attemp.pdf` are my handwritten derivations of the vote-decision and replication paths.
+Handwritten notes in [`Evidence/`](Evidence/) cover RequestVote decisions, log freshness and split-vote timing.
 
-## Status
-
-Leader election, log replication and commitment, durable storage, and the deterministic simulator are complete and green. Snapshotting, membership changes, and client-session deduplication are not implemented — the project's goal was correctness depth on the core protocol, not feature completeness.
-
-## Licence
+## License
 
 MIT — see [LICENSE](LICENSE).
