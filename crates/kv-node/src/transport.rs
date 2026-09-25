@@ -1,11 +1,11 @@
-//! TCP transport: length-prefixed JSON frames,
+//! TCP transport using length-prefixed JSON frames,
 //! fire-and-forget peer links, reconnect-on-failure.
 //!
 //! What this layer is ALLOWED to be bad at is the point: Raft assumes an
 //! asynchronous, unreliable network — messages may be lost, delayed,
 //! reordered, or duplicated — and stays correct anyway. So `send` never
 //! blocks, never retries a message, and never correlates request/response:
-//! a dropped connection just means silence until the next heartbeat (R17).
+//! a dropped connection just means silence until the next heartbeat.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -22,6 +22,16 @@ use tracing::{debug, warn};
 
 /// Frames larger than this are a protocol error: the connection is dropped.
 pub const MAX_FRAME_BYTES: u32 = 8 * 1024 * 1024;
+
+/// Maximum number of messages waiting for a single peer. With frames allowed
+/// to approach [`MAX_FRAME_BYTES`], this deliberately small queue keeps the
+/// per-peer memory bound practical. A saturated link is treated like packet
+/// loss; a later heartbeat will retry replication.
+pub const OUTBOUND_QUEUE_CAPACITY: usize = 4;
+
+/// Maximum number of decoded frames waiting for the single-writer driver.
+/// Awaiting a full queue propagates TCP backpressure to each peer connection.
+pub const INBOUND_QUEUE_CAPACITY: usize = 8;
 
 /// Wire format: `u32` big-endian payload length, then `serde_json` bytes of
 /// `(from: NodeId, msg: RaftMessage)`. TCP is a byte stream, not a message
@@ -89,7 +99,7 @@ impl FrameDecoder {
     }
 }
 
-/// Fire-and-forget by design (§4/M2): no acknowledgments, no resend queues,
+/// Fire-and-forget by design: no acknowledgments, no resend queues,
 /// no exactly-once machinery — correctness reasoning lives in the state
 /// machine, so the network layer stays cheap.
 pub trait Transport {
@@ -101,7 +111,7 @@ pub trait Transport {
 #[derive(Clone)]
 pub struct TcpTransport {
     self_id: NodeId,
-    outbound: BTreeMap<NodeId, mpsc::UnboundedSender<RaftMessage>>,
+    outbound: BTreeMap<NodeId, mpsc::Sender<RaftMessage>>,
 }
 
 impl TcpTransport {
@@ -109,7 +119,7 @@ impl TcpTransport {
     pub fn spawn(self_id: NodeId, peers: &[(NodeId, SocketAddr)]) -> TcpTransport {
         let mut outbound = BTreeMap::new();
         for &(peer, addr) in peers {
-            let (tx, rx) = mpsc::unbounded_channel();
+            let (tx, rx) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
             tokio::spawn(peer_task(self_id, peer, addr, rx));
             outbound.insert(peer, tx);
         }
@@ -120,9 +130,21 @@ impl TcpTransport {
 impl Transport for TcpTransport {
     fn send(&self, to: NodeId, msg: RaftMessage) {
         if let Some(tx) = self.outbound.get(&to) {
-            // A closed channel means the peer task is gone (shutdown); loss
-            // is tolerated by design.
-            let _ = tx.send(msg);
+            match tx.try_send(msg) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    debug!(
+                        self_id = self.self_id,
+                        to, "outbound queue full; message dropped"
+                    );
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    debug!(
+                        self_id = self.self_id,
+                        to, "peer task stopped; message dropped"
+                    );
+                }
+            }
         } else {
             warn!(self_id = self.self_id, to, "send to unknown peer dropped");
         }
@@ -133,7 +155,7 @@ async fn peer_task(
     self_id: NodeId,
     peer: NodeId,
     addr: SocketAddr,
-    mut rx: mpsc::UnboundedReceiver<RaftMessage>,
+    mut rx: mpsc::Receiver<RaftMessage>,
 ) {
     loop {
         match TcpStream::connect(addr).await {
@@ -152,8 +174,8 @@ async fn peer_task(
                                 }
                             };
                             if let Err(e) = stream.write_all(&frame).await {
-                                // The message is lost; Raft tolerates it (R17
-                                // retries via the heartbeat cadence).
+                                // The message is lost; the heartbeat cadence
+                                // naturally retries replication.
                                 debug!(peer, error = %e, "write failed; reconnecting");
                                 break;
                             }
@@ -169,7 +191,7 @@ async fn peer_task(
                     tokio::select! {
                         () = &mut backoff => break,
                         m = rx.recv() => match m {
-                            // Disconnected: drop silently at debug (§4/M2).
+                            // Disconnected messages are dropped at debug level.
                             Some(_) => debug!(peer, "message dropped while disconnected"),
                             None => return,
                         },
@@ -180,11 +202,11 @@ async fn peer_task(
     }
 }
 
-/// Binds `127.0.0.1:<port>` (§9: never 0.0.0.0) and feeds every decoded
+/// Binds `127.0.0.1:<port>` and feeds every decoded
 /// inbound frame into `tx`. Returns the accept-loop task handle.
 pub async fn spawn_listener(
     port: u16,
-    tx: mpsc::UnboundedSender<(NodeId, RaftMessage)>,
+    tx: mpsc::Sender<(NodeId, RaftMessage)>,
 ) -> io::Result<JoinHandle<()>> {
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
     Ok(tokio::spawn(async move {
@@ -202,7 +224,7 @@ pub async fn spawn_listener(
 async fn conn_task(
     mut stream: TcpStream,
     remote: SocketAddr,
-    tx: mpsc::UnboundedSender<(NodeId, RaftMessage)>,
+    tx: mpsc::Sender<(NodeId, RaftMessage)>,
 ) {
     let mut dec = FrameDecoder::default();
     let mut chunk = [0u8; 16 * 1024];
@@ -217,7 +239,7 @@ async fn conn_task(
                 loop {
                     match dec.next_frame() {
                         Ok(Some(frame)) => {
-                            if tx.send(frame).is_err() {
+                            if tx.send(frame).await.is_err() {
                                 return; // driver gone — shut down
                             }
                         }
@@ -239,9 +261,10 @@ async fn conn_task(
 
 #[cfg(test)]
 mod tests {
-    use raft_core::{Command, Entry};
+    use raft_core::{Command, Entry, MAX_APPEND_ENTRIES};
 
     use super::*;
+    use crate::http::{MAX_KEY_BYTES, MAX_VALUE_BYTES};
 
     /// One message per RaftMessage variant, with entries covering every
     /// Command variant.
@@ -337,5 +360,58 @@ mod tests {
             Err(FrameError::Oversize { len }) => assert_eq!(len, MAX_FRAME_BYTES + 1),
             other => panic!("expected Oversize protocol error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn maximum_http_commands_fit_one_replication_frame() {
+        let key = "\0".repeat(MAX_KEY_BYTES);
+        let value = "\0".repeat(MAX_VALUE_BYTES);
+        let entries = (1..=MAX_APPEND_ENTRIES)
+            .map(|index| Entry {
+                index: index as u64,
+                term: 1,
+                command: Command::Put {
+                    key: key.clone(),
+                    value: value.clone(),
+                },
+            })
+            .collect();
+        let message = RaftMessage::AppendEntries {
+            term: 1,
+            leader_id: 1,
+            prev_log_index: 0,
+            prev_log_term: 0,
+            entries,
+            leader_commit: 0,
+        };
+
+        let frame = encode_frame(1, &message).expect("maximum API-originated batch must fit");
+        assert!(frame.len() - 4 <= MAX_FRAME_BYTES as usize);
+    }
+
+    #[test]
+    fn outbound_queue_drops_on_saturation_and_closed_peer() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let first = all_variants().remove(0);
+        let second = all_variants().remove(1);
+        let transport = TcpTransport {
+            self_id: 1,
+            outbound: BTreeMap::from([(2, tx)]),
+        };
+
+        transport.send(2, first.clone());
+        transport.send(2, second);
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            first,
+            "the queued message is retained"
+        );
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "the message sent to a full queue is dropped"
+        );
+
+        drop(rx);
+        transport.send(2, all_variants().remove(0));
     }
 }

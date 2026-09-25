@@ -1,7 +1,7 @@
 //! Inline PCG32 (PCG-XSH-RR 32/64) — the ONLY randomness in `raft-core`.
 //!
-//! Implemented without external crates from M.E. O'Neill's PCG algorithm
-//! description (pcg-random.org). The generator's
+//! Implemented from the algorithm description in M.E. O'Neill's PCG paper
+//! (pcg-random.org); no external crates. The generator's
 //! identity is pinned forever by `pcg32_reference_sequence`: elections draw
 //! their timeouts from this generator, so a silently-changed RNG would silently
 //! change every seeded simulation result in the project.
@@ -55,10 +55,10 @@ impl Pcg32 {
 mod tests {
     use super::*;
 
-    /// Pins the generator's identity: seed 42 must reproduce the published
-    /// pcg32-demo reference sequence for
-    /// `pcg32_srandom(42, 54)`, cross-checked with an independent implementation
-    /// before being hardcoded here. If this test ever
+    /// Pins the generator's identity forever: seed 42
+    /// must reproduce the published pcg32-demo reference sequence for
+    /// `pcg32_srandom(42, 54)`, independently reproduced with a second
+    /// implementation before being hardcoded here. If this test ever
     /// fails, the RNG changed — and every seeded simulation result in the
     /// project silently changed with it.
     #[test]
@@ -68,8 +68,8 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                0xa15c02b7, 0x7b47f409, 0xba1d3330, 0x83d2f293, 0xbfa4784b, 0xcbed606e,
-                0xbfc6a3ad, 0x812fff6d,
+                0xa15c02b7, 0x7b47f409, 0xba1d3330, 0x83d2f293, 0xbfa4784b, 0xcbed606e, 0xbfc6a3ad,
+                0x812fff6d,
             ]
         );
     }

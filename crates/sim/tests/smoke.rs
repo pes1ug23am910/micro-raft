@@ -1,6 +1,4 @@
-//! M0 placeholder: proves `sim` links against `raft-core` and pins the R1 boot
-//! state (volatile indices start at 0; a fresh node is a Follower at term 0).
-//! The real simulator arrives in M3.
+//! Pins the fresh-node boot state and the simulator's core dependency.
 
 use raft_core::{HardState, RaftNode, Role};
 

@@ -1,6 +1,5 @@
-//! Log-replication, repair, and Figure 8 commitment acceptance tests under the
-//! deterministic simulator. Every failure
-//! message carries its seed.
+//! Log replication, repair, and Figure 8-safe commitment under the
+//! deterministic simulator. Every failure message carries its seed.
 
 use raft_core::{Command, Effect, Entry, HardState, LogIndex, RaftMessage, Term};
 use sim::Sim;
@@ -16,7 +15,7 @@ fn entries(range: std::ops::RangeInclusive<u64>, term_of: impl Fn(LogIndex) -> T
 }
 
 /// The applied history with NoOps filtered out — NoOps are present in logs
-/// and applied histories but have no KV effect (§4/M4).
+/// and applied histories but have no KV effect.
 fn applied_commands(sim: &Sim, id: u8) -> Vec<Command> {
     sim.applied(id)
         .iter()
@@ -39,7 +38,9 @@ fn entries_replicate_and_apply() {
             let (k, v) = (format!("k{i}"), format!("v{i}"));
             let effects = sim.client_put(leader, &k, &v);
             assert!(
-                effects.iter().any(|e| matches!(e, Effect::ProposeAccepted { .. })),
+                effects
+                    .iter()
+                    .any(|e| matches!(e, Effect::ProposeAccepted { .. })),
                 "seed={seed}: leader must accept proposal {i}"
             );
             proposed.push(Command::Put { key: k, value: v });
@@ -118,7 +119,9 @@ fn not_leader_propose_rejected() {
              with leader_hint Some(n{leader}); got {rejected:?}"
         );
         assert!(
-            !effects.iter().any(|e| matches!(e, Effect::ProposeAccepted { .. })),
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::ProposeAccepted { .. })),
             "seed={seed}: a follower must never accept a proposal (R20)"
         );
     }
@@ -134,9 +137,7 @@ fn divergent_follower_converges() {
         );
         let all_logs_equal =
             |s: &Sim| s.node(1).log == s.node(2).log && s.node(2).log == s.node(3).log;
-        let followers: Vec<u8> = (1..=3)
-            .filter(|&id| Some(id) != sim.leader())
-            .collect();
+        let followers: Vec<u8> = (1..=3).filter(|&id| Some(id) != sim.leader()).collect();
 
         for (phase, &isolated) in followers.iter().enumerate() {
             // Partition one follower away; the remaining two are a majority.
@@ -150,7 +151,9 @@ fn divergent_follower_converges() {
                 let leader = sim.leader().expect("just checked");
                 let effects = sim.client_put(leader, &format!("p{phase}k{i}"), "v");
                 assert!(
-                    effects.iter().any(|e| matches!(e, Effect::ProposeAccepted { .. })),
+                    effects
+                        .iter()
+                        .any(|e| matches!(e, Effect::ProposeAccepted { .. })),
                     "seed={seed}: leader must accept phase-{phase} proposal {i}"
                 );
                 sim.run_ms(100);
@@ -224,7 +227,7 @@ fn deep_divergence_repaired() {
     }
 }
 
-/// The flagship regression (§4/M4): a majority-replicated PRIOR-term entry
+/// The flagship regression: a majority-replicated PRIOR-term entry
 /// must not commit by count alone — R19(b), the exact clause Figure 8 of the
 /// paper exists to justify. Scripted on 5 nodes with the paper's history
 /// seeded and the decisive term-4 phase played out organically.

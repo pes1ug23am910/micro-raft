@@ -1,18 +1,17 @@
-//! Log replication & commitment. M3 ships only what elections need:
+//! Log replication and commitment: elections first need
 //! AppendEntries as heartbeats (R17 with empty entries, real `prev_log_*`),
 //! follower timing acceptance (R6b) and candidate step-down (R11).
 //!
-//! M4: the consistency check (R12), conflict truncation + append (R13),
+//! The complete path adds the consistency check (R12), conflict truncation + append (R13),
 //! follower commit update (R14), leader bookkeeping and backoff (R18), the
-//! pure `commit_advance` function (R19 — kept pure for the Gate 2 hand-diff),
+//! pure `commit_advance` function (R19),
 //! client proposals (R20), and the leader NoOp completing R16.
 
 use crate::message::{Effect, RaftMessage};
 use crate::types::{Command, Entry, LogIndex, NodeId, Role, Term};
-use crate::RaftNode;
+use crate::{RaftNode, MAX_APPEND_ENTRIES};
 
-/// R19 as a pure function (the Gate 2 hand-diff target, like `decide_vote`
-/// was for Gate 1).
+/// R19 as a pure function so the commitment rule is independently testable.
 ///
 /// `match_indexes` carries one replication watermark per cluster member —
 /// the leader's own log length included. Returns the largest `N > current`
@@ -42,20 +41,26 @@ pub fn commit_advance(
 }
 
 impl RaftNode {
-    /// R17: to every peer, the entries from `next_index[p]` onward (empty =
-    /// pure heartbeat), anchored at `prev_log_index/term`. Entries piggyback
-    /// on the heartbeat cadence rather than being pushed on propose — a
-    /// documented simplification costing at most one HEARTBEAT_MS of latency.
+    /// R17: to every peer, a bounded batch beginning at `next_index[p]`
+    /// (empty = pure heartbeat), anchored at `prev_log_index/term`. Entries
+    /// piggyback on the heartbeat cadence rather than being pushed on propose,
+    /// costing at most one HEARTBEAT_MS of latency per catch-up batch.
     pub(crate) fn send_append_entries(&mut self, effects: &mut Vec<Effect>) {
         let Role::Leader { next_index, .. } = &self.role else {
             return;
         };
         for &peer in &self.peers {
-            let next = next_index.get(&peer).map_or(self.last_log_index() + 1, |&n| n);
+            let next = next_index
+                .get(&peer)
+                .map_or(self.last_log_index() + 1, |&n| n);
             let prev_log_index = next - 1;
             let prev_log_term = self.term_at(prev_log_index);
             let from = usize::try_from(prev_log_index).expect("log index fits usize");
-            let entries = self.log.get(from..).map_or_else(Vec::new, <[Entry]>::to_vec);
+            let to = from.saturating_add(MAX_APPEND_ENTRIES).min(self.log.len());
+            let entries = self
+                .log
+                .get(from..to)
+                .map_or_else(Vec::new, <[Entry]>::to_vec);
             effects.push(Effect::Send {
                 to: peer,
                 msg: RaftMessage::AppendEntries {
@@ -87,7 +92,7 @@ impl RaftNode {
             command,
         };
         self.log.push(entry.clone());
-        // §2.4 contract: the persist precedes the accept — nothing may act on
+        // The persist precedes the accept — nothing may act on
         // an entry the leader itself hasn't made durable.
         effects.push(Effect::PersistLogEntries {
             truncate_from: None,
@@ -97,7 +102,7 @@ impl RaftNode {
     }
 
     /// The follower's accept path: R12 consistency check, R13 conflict
-    /// repair + append, R14 commit update, R4 apply — after the M3 rules
+    /// repair + append, R14 commit update, R4 apply — after the term rules
     /// (R3 stale rejection, R11 candidate step-down, R6b timing).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn on_append_entries(
@@ -174,7 +179,7 @@ impl RaftNode {
         if !appended.is_empty() {
             self.log.extend(appended.iter().cloned());
             // One persist effect, emitted only because the log changed, and
-            // before the success reply below (§2.4 contract).
+            // before the success reply below.
             effects.push(Effect::PersistLogEntries {
                 truncate_from,
                 entries: appended,
@@ -225,7 +230,8 @@ impl RaftNode {
             else {
                 return;
             };
-            let (Some(next), Some(matched)) = (next_index.get_mut(&from), peer_match.get_mut(&from))
+            let (Some(next), Some(matched)) =
+                (next_index.get_mut(&from), peer_match.get_mut(&from))
             else {
                 return; // not a peer of this cluster
             };
@@ -252,6 +258,8 @@ impl RaftNode {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
 
     fn log(terms: &[Term]) -> Vec<Entry> {
@@ -301,5 +309,58 @@ mod tests {
         assert_eq!(commit_advance(1, 1, &l, &[4, 3, 3]), Some(3));
         // Already committed there: nothing new.
         assert_eq!(commit_advance(3, 1, &l, &[4, 3, 3]), None);
+    }
+
+    #[test]
+    fn lagging_follower_advances_in_bounded_batches() {
+        let mut node = RaftNode::new(1, vec![2], 7);
+        node.hard.current_term = 4;
+        node.log = log(&vec![4; MAX_APPEND_ENTRIES * 2 + 5]);
+        node.role = Role::Leader {
+            next_index: BTreeMap::from([(2, 1)]),
+            match_index: BTreeMap::from([(2, 0)]),
+        };
+
+        let mut batch_sizes = Vec::new();
+        let mut matched = 0;
+        while matched < node.last_log_index() {
+            let mut effects = Vec::new();
+            node.send_append_entries(&mut effects);
+            let (prev, entries) = effects
+                .iter()
+                .find_map(|effect| match effect {
+                    Effect::Send {
+                        to: 2,
+                        msg:
+                            RaftMessage::AppendEntries {
+                                prev_log_index,
+                                entries,
+                                ..
+                            },
+                    } => Some((*prev_log_index, entries)),
+                    _ => None,
+                })
+                .expect("leader sends to its follower");
+
+            assert_eq!(prev, matched);
+            assert!(!entries.is_empty());
+            assert!(entries.len() <= MAX_APPEND_ENTRIES);
+            batch_sizes.push(entries.len());
+            matched += u64::try_from(entries.len()).expect("batch length fits");
+
+            let mut reply_effects = Vec::new();
+            node.on_append_entries_reply(2, 4, true, matched, &mut reply_effects);
+        }
+
+        assert_eq!(batch_sizes, vec![MAX_APPEND_ENTRIES, MAX_APPEND_ENTRIES, 5]);
+        let Role::Leader {
+            next_index,
+            match_index,
+        } = &node.role
+        else {
+            panic!("node stopped leading");
+        };
+        assert_eq!(match_index.get(&2), Some(&node.last_log_index()));
+        assert_eq!(next_index.get(&2), Some(&(node.last_log_index() + 1)));
     }
 }

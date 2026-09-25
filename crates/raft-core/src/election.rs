@@ -1,7 +1,8 @@
-//! Leader election (M3): election start (R8), the vote decision (R9), reply
+//! Leader election: election start (R8), the vote decision (R9), reply
 //! counting (R10), and the transition to leadership (R16's election half).
 //!
-//! `decide_vote` stays pure so its vote rule can be tested independently.
+//! `decide_vote` is a pure function so its safety-critical rule can be tested
+//! independently of node state transitions.
 
 use crate::message::{Effect, RaftMessage};
 use crate::types::{Command, Entry, HardState, LogIndex, NodeId, Role, Term};
@@ -23,7 +24,7 @@ pub struct RequestVoteRq {
 /// (None, or already exactly this candidate — one vote per term, ever);
 /// (b) the candidate's log is *at least as up-to-date*: LAST TERMS compared
 /// first, lengths only as the tie-break. Comparing by index alone elects
-/// data-losing leaders (Gate 1 probe 2).
+/// data-losing leaders.
 ///
 /// Assumes R2/R3 already ran, so `req.term == hard.current_term`.
 pub fn decide_vote(hard: &HardState, my_last: (LogIndex, Term), req: &RequestVoteRq) -> bool {
@@ -49,9 +50,8 @@ impl RaftNode {
         votes_received.insert(self.id);
         self.role = Role::Candidate { votes_received };
         self.reset_election_deadline(); // R6c
-        // §2.4 contract: the persist precedes the RequestVote sends — a
-        // candidate that solicits before its term/vote are durable can
-        // double-vote after a crash (Gate 3 material).
+                                        // The persist precedes the RequestVote sends. Otherwise a candidate
+                                        // could forget its self-vote after a crash and vote twice in one term.
         effects.push(Effect::PersistHardState(self.hard.clone()));
         effects.push(Effect::RoleChanged {
             role_name: "Candidate",
@@ -97,7 +97,11 @@ impl RaftNode {
             last_log_index,
             last_log_term,
         };
-        let grant = decide_vote(&self.hard, (self.last_log_index(), self.last_log_term()), &req);
+        let grant = decide_vote(
+            &self.hard,
+            (self.last_log_index(), self.last_log_term()),
+            &req,
+        );
         if grant {
             self.hard.voted_for = Some(candidate_id);
             self.reset_election_deadline(); // R6a: granting resets the timer…
@@ -125,7 +129,7 @@ impl RaftNode {
     ) {
         // R3: stale replies — an older term, or arriving in a role that no
         // longer expects them — are ignored entirely.
-        if term != self.hard.current_term || !vote_granted {
+        if term != self.hard.current_term || !vote_granted || !self.peers.contains(&from) {
             return;
         }
         let majority = self.majority();
@@ -164,7 +168,7 @@ impl RaftNode {
             command: Command::NoOp,
         };
         self.log.push(noop.clone());
-        // §2.4 contract: the append's persist precedes the Sends that carry it.
+        // The append's persist precedes the Sends that carry it.
         effects.push(Effect::PersistLogEntries {
             truncate_from: None,
             entries: vec![noop],
@@ -199,7 +203,7 @@ mod tests {
     }
 
     /// R9b's load-bearing detail: a LONGER log with an OLDER last term is
-    /// LESS up-to-date (the Gate 1 worked example). Index-only comparison
+    /// LESS up-to-date. Index-only comparison
     /// would elect a data-losing leader.
     #[test]
     fn decide_vote_term_outranks_length() {
@@ -224,5 +228,26 @@ mod tests {
         assert!(!decide_vote(&hard(None), (5, 3), &req(2, 4, 3)));
         assert!(decide_vote(&hard(None), (5, 3), &req(2, 5, 3)));
         assert!(decide_vote(&hard(None), (5, 3), &req(2, 6, 3)));
+    }
+
+    #[test]
+    fn unknown_and_duplicate_vote_replies_do_not_form_a_majority() {
+        let mut node = RaftNode::new(1, vec![2, 3, 4, 5], 7);
+        let mut effects = Vec::new();
+        node.start_election(&mut effects);
+        let term = node.hard.current_term;
+
+        node.on_request_vote_reply(99, term, true, &mut effects);
+        assert!(matches!(node.role, Role::Candidate { .. }));
+
+        node.on_request_vote_reply(2, term, true, &mut effects);
+        node.on_request_vote_reply(2, term, true, &mut effects);
+        assert!(matches!(node.role, Role::Candidate { .. }));
+
+        node.on_request_vote_reply(3, term, true, &mut effects);
+        assert!(
+            node.is_leader(),
+            "two distinct peers plus the self-vote is a majority"
+        );
     }
 }

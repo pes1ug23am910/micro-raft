@@ -1,4 +1,4 @@
-//! Stable core data types shared by the state machine, drivers, and simulator.
+//! Core data types shared by the state machine and its drivers.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -14,8 +14,13 @@ pub type LogIndex = u64;
 /// A state-machine command carried by a log entry.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Command {
-    Put { key: String, value: String },
-    Delete { key: String },
+    Put {
+        key: String,
+        value: String,
+    },
+    Delete {
+        key: String,
+    },
     /// Appended by a leader on election win (R16) so it can promptly commit
     /// something from its own term — the practical answer to Figure 8 (R19b).
     NoOp,
@@ -37,7 +42,8 @@ pub struct HardState {
 }
 
 /// The node's role, carrying exactly the volatile per-role state Figure 2
-/// assigns. `BTreeSet` and `BTreeMap` keep iteration order deterministic.
+/// assigns. `BTreeSet`/`BTreeMap`, never `HashMap`: iteration order must not
+/// be able to influence deterministic behavior.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Role {
     Follower,

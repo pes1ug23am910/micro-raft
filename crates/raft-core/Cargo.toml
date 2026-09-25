@@ -8,6 +8,6 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# Keep the pure core dependency surface limited to serialization derives.
+# Keep the consensus core I/O-free and its dependency surface minimal.
 [dependencies]
 serde = { workspace = true }

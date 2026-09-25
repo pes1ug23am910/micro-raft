@@ -8,10 +8,9 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# Runtime dependencies cover transport, serialization, logging, CLI parsing,
-# and OS-generated node seeds; add an HTTP dependency only with an HTTP API.
 [dependencies]
 raft-core = { path = "../raft-core" }
+axum = "0.8"
 clap = { version = "4", features = ["derive"] }
 rand = "0.9"
 serde = { workspace = true }

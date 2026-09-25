@@ -1,2 +1,2 @@
-# LF everywhere keeps log.jsonl byte offsets and CRCs stable across checkouts.
+# Keep line-oriented storage byte offsets and checksums stable across platforms.
 * text=auto eol=lf

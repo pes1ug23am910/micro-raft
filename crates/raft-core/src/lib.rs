@@ -7,7 +7,7 @@
 //! the real driver (`kv-node`: tokio, TCP, disk) and the simulator (`sim`:
 //! virtual clock, virtual network, virtual disk).
 //!
-//! Timing is core-owned (decision D-000): election/heartbeat deadlines are
+//! Timing is core-owned: election/heartbeat deadlines are
 //! computed from the `now_ms` carried by [`Input::Tick`]. There is no timer
 //! effect, so driver and core can never disagree about time — and the sim
 //! controls time trivially.
@@ -23,18 +23,77 @@ pub use message::{Effect, Input, RaftMessage};
 pub use replication::commit_advance;
 pub use types::{Command, Entry, HardState, LogIndex, NodeId, Role, Term};
 
+use std::fmt;
+
 use rng::Pcg32;
 
 /// Drivers deliver `Input::Tick` every this-many logical milliseconds.
 pub const TICK_MS: u64 = 10;
-/// Leader heartbeat cadence. Must stay ≪ `ELECTION_MIN_MS` (Gate 1 probe 5).
+/// Leader heartbeat cadence. Must stay well below `ELECTION_MIN_MS`.
 pub const HEARTBEAT_MS: u64 = 50;
 /// Election timeout lower bound.
 pub const ELECTION_MIN_MS: u64 = 150;
 /// Election timeout upper bound: deadline = now + rng.range_inclusive(150, 300).
 pub const ELECTION_MAX_MS: u64 = 300;
+/// Maximum entries carried by one `AppendEntries` RPC. With 64 KiB values
+/// and worst-case JSON escaping, sixteen entries stay below the driver's
+/// 8 MiB frame cap while allowing bounded, steady catch-up. Drivers embedding
+/// the core must ensure that a single entry is frame-encodable.
+pub const MAX_APPEND_ENTRIES: usize = 16;
 
-/// One Raft node as a pure state machine; drivers execute its returned effects.
+/// A persisted log that cannot have been produced by a correct Raft node.
+///
+/// Storage validates framing, CRCs, and contiguous indices while reading.
+/// The core repeats the structural checks at its trust boundary so a caller
+/// cannot accidentally boot with state that would invalidate 1-based log
+/// indexing throughout the algorithm.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RestoreError {
+    NonContiguousIndex {
+        expected: LogIndex,
+        found: LogIndex,
+    },
+    TermRegression {
+        index: LogIndex,
+        previous: Term,
+        found: Term,
+    },
+    EntryTermExceedsCurrent {
+        index: LogIndex,
+        entry_term: Term,
+        current_term: Term,
+    },
+}
+
+impl fmt::Display for RestoreError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RestoreError::NonContiguousIndex { expected, found } => {
+                write!(f, "recovered log index {found} is not expected index {expected}")
+            }
+            RestoreError::TermRegression {
+                index,
+                previous,
+                found,
+            } => write!(
+                f,
+                "recovered log term regresses at index {index}: {previous} -> {found}"
+            ),
+            RestoreError::EntryTermExceedsCurrent {
+                index,
+                entry_term,
+                current_term,
+            } => write!(
+                f,
+                "recovered entry at index {index} has term {entry_term} above current term {current_term}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RestoreError {}
+
+/// One Raft node as a pure state machine.
 #[derive(Debug)]
 pub struct RaftNode {
     pub id: NodeId,
@@ -52,7 +111,7 @@ pub struct RaftNode {
     /// "last known leader" R20 serves as `ProposeRejected`'s hint. Best-effort
     /// by design: never cleared, only overwritten by a fresher sighting.
     pub(crate) leader_hint: Option<NodeId>,
-    // -- timing, all in logical milliseconds fed via Tick (core-owned; D-000) --
+    // -- timing, all in logical milliseconds fed via Tick (core-owned) --
     pub(crate) now_ms: u64,
     /// When to start/restart an election (R5). 0 = not yet drawn (first Tick).
     pub(crate) election_deadline_ms: u64,
@@ -64,7 +123,7 @@ pub struct RaftNode {
 
 impl RaftNode {
     /// A fresh, never-booted node: empty log, term 0, `Follower` (R1).
-    /// M5: recovered `HardState` + log from storage become parameters here.
+    /// Recovered `HardState` + log from storage are supplied to [`Self::restore`].
     pub fn new(id: NodeId, peers: Vec<NodeId>, seed: u64) -> Self {
         RaftNode {
             id,
@@ -83,8 +142,54 @@ impl RaftNode {
         }
     }
 
+    /// Rebuild a node from exactly Raft's persistent state (R1).
+    ///
+    /// All volatile state deliberately resets: the node returns as a
+    /// follower with `commit_index == last_applied == 0`, no leader hint, and
+    /// fresh logical timers/RNG state. Commitment is learned again from the
+    /// next valid leader contact, at which point the apply loop replays the
+    /// committed prefix into the volatile state machine.
+    pub fn restore(
+        id: NodeId,
+        peers: Vec<NodeId>,
+        seed: u64,
+        hard: HardState,
+        log: Vec<Entry>,
+    ) -> Result<Self, RestoreError> {
+        let mut previous_term = 0;
+        for (offset, entry) in log.iter().enumerate() {
+            let expected = offset as LogIndex + 1;
+            if entry.index != expected {
+                return Err(RestoreError::NonContiguousIndex {
+                    expected,
+                    found: entry.index,
+                });
+            }
+            if entry.term < previous_term {
+                return Err(RestoreError::TermRegression {
+                    index: entry.index,
+                    previous: previous_term,
+                    found: entry.term,
+                });
+            }
+            if entry.term > hard.current_term {
+                return Err(RestoreError::EntryTermExceedsCurrent {
+                    index: entry.index,
+                    entry_term: entry.term,
+                    current_term: hard.current_term,
+                });
+            }
+            previous_term = entry.term;
+        }
+
+        let mut node = Self::new(id, peers, seed);
+        node.hard = hard;
+        node.log = log;
+        Ok(node)
+    }
+
     /// Feed one input; get back an ordered list of effects the driver must
-    /// execute — in the exact order emitted (§2.4 contract: every `Persist*`
+    /// execute — in the exact order emitted: every `Persist*`
     /// precedes the `Send`s that depend on it).
     pub fn step(&mut self, input: Input) -> Vec<Effect> {
         let mut effects = Vec::new();
@@ -98,7 +203,7 @@ impl RaftNode {
 
     fn on_tick(&mut self, now_ms: u64, effects: &mut Vec<Effect>) {
         self.now_ms = now_ms;
-        // First tick after boot: draw the initial randomized deadline (D-000).
+        // First tick after boot: draw the initial randomized deadline.
         if self.election_deadline_ms == 0 {
             self.reset_election_deadline();
         }
@@ -132,8 +237,17 @@ impl RaftNode {
         if msg_term > self.hard.current_term {
             self.hard.current_term = msg_term;
             self.hard.voted_for = None;
-            self.become_follower(effects);
+            let role_changed = !matches!(self.role, Role::Follower);
+            self.role = Role::Follower;
+            // The newer term is durable before RoleChanged can fail pending
+            // client work or otherwise make the transition externally visible.
             effects.push(Effect::PersistHardState(self.hard.clone()));
+            if role_changed {
+                effects.push(Effect::RoleChanged {
+                    role_name: "Follower",
+                    term: self.hard.current_term,
+                });
+            }
         }
         match msg {
             RaftMessage::RequestVote {
@@ -212,12 +326,13 @@ impl RaftNode {
         }
     }
 
-    /// Explicit convention (§4/M4): `term_at(0) == 0` — "before the log".
+    /// Explicit convention: `term_at(0) == 0` — "before the log".
     pub(crate) fn term_at(&self, index: LogIndex) -> Term {
         if index == 0 {
             return 0;
         }
-        self.log.get(usize::try_from(index - 1).expect("log index fits usize"))
+        self.log
+            .get(usize::try_from(index - 1).expect("log index fits usize"))
             .map_or(0, |e| e.term)
     }
 
@@ -234,5 +349,68 @@ impl RaftNode {
 
     pub fn is_leader(&self) -> bool {
         matches!(self.role, Role::Leader { .. })
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+
+    fn entry(index: LogIndex, term: Term) -> Entry {
+        Entry {
+            index,
+            term,
+            command: Command::NoOp,
+        }
+    }
+
+    #[test]
+    fn restore_keeps_only_persistent_state() {
+        let hard = HardState {
+            current_term: 7,
+            voted_for: Some(2),
+        };
+        let log = vec![entry(1, 2), entry(2, 7)];
+        let node = RaftNode::restore(1, vec![2, 3], 99, hard.clone(), log.clone())
+            .expect("valid recovered state");
+
+        assert_eq!(node.hard, hard);
+        assert_eq!(node.log, log);
+        assert_eq!(node.commit_index, 0);
+        assert_eq!(node.last_applied, 0);
+        assert_eq!(node.role, Role::Follower);
+        assert_eq!(node.leader_hint, None);
+        assert_eq!(node.now_ms, 0);
+        assert_eq!(node.election_deadline_ms, 0);
+        assert_eq!(node.heartbeat_due_ms, 0);
+    }
+
+    #[test]
+    fn restore_rejects_structurally_impossible_logs() {
+        let hard = HardState {
+            current_term: 4,
+            voted_for: None,
+        };
+        assert!(matches!(
+            RaftNode::restore(1, vec![2, 3], 1, hard.clone(), vec![entry(2, 1)]),
+            Err(RestoreError::NonContiguousIndex {
+                expected: 1,
+                found: 2
+            })
+        ));
+        assert!(matches!(
+            RaftNode::restore(
+                1,
+                vec![2, 3],
+                1,
+                hard.clone(),
+                vec![entry(1, 3), entry(2, 2)]
+            ),
+            Err(RestoreError::TermRegression { index: 2, .. })
+        ));
+        assert!(matches!(
+            RaftNode::restore(1, vec![2, 3], 1, hard, vec![entry(1, 5)]),
+            Err(RestoreError::EntryTermExceedsCurrent { index: 1, .. })
+        ));
     }
 }

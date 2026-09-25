@@ -1,10 +1,8 @@
-//! Raft safety invariants asserted after every simulator step.
+//! Safety checkers asserted after every simulator step.
 //!
-//! M3 shipped **ElectionSafety** (at most one node ever reaches Leader in a
-//! given term) and **TermMonotonicity** (a node's current_term never
-//! decreases). M4 adds **LogMatching**, **StateMachineSafety**, and the
-//! **CommittedRegistry** with LeaderCompleteness/CommittedDurability v1;
-//! M5–M6 extend the registry checks across crash schedules.
+//! They cover **ElectionSafety**, **TermMonotonicity**, **LogMatching**,
+//! **StateMachineSafety**, **LeaderCompleteness**, and durable-majority
+//! preservation across crash schedules.
 //!
 //! Every panic carries the run's seed: `seed=N` replays the exact failure.
 
@@ -41,13 +39,37 @@ impl Invariants {
     }
 
     /// Every (term → leader) pair ever observed — the `leaders_by_term()`
-    /// accessor of §4/M3.
+    /// accessor on the simulator.
     pub fn leaders_by_term(&self) -> &BTreeMap<Term, NodeId> {
         &self.leaders_by_term
     }
 }
 
-/// LogMatching (§4/M4): for every pair of nodes, wherever both logs hold an
+/// Every in-memory and durable log must preserve Raft's 1-based contiguous
+/// indexing and nondecreasing term history. These structural properties are
+/// checked independently of persistence effects, so a missing or malformed
+/// effect cannot hide a broken log from the simulator.
+pub fn check_log_structure(seed: u64, id: NodeId, kind: &str, log: &[Entry]) {
+    let mut previous_term = 0;
+    for (offset, entry) in log.iter().enumerate() {
+        let expected = offset as LogIndex + 1;
+        assert_eq!(
+            entry.index, expected,
+            "seed={seed}: n{id} {kind} log is non-contiguous — found index {} at position {expected}",
+            entry.index
+        );
+        assert!(
+            entry.term >= previous_term,
+            "seed={seed}: n{id} {kind} log term regressed at index {}: {} -> {}",
+            entry.index,
+            previous_term,
+            entry.term
+        );
+        previous_term = entry.term;
+    }
+}
+
+/// LogMatching: for every pair of nodes, wherever both logs hold an
 /// entry with the same index and term, the logs must be identical up through
 /// that index. Per the inductive property it suffices to find the LAST
 /// common index with equal terms and assert prefix equality there.
@@ -65,7 +87,7 @@ pub fn check_log_matching(seed: u64, a_id: NodeId, a: &[Entry], b_id: NodeId, b:
     }
 }
 
-/// StateMachineSafety (§4/M4): no two nodes' applied histories may disagree
+/// StateMachineSafety: no two nodes' applied histories may disagree
 /// at any index. Histories only grow, so comparing overlapping prefixes
 /// after every application keeps the check incremental and complete.
 pub fn check_applied_agreement(
@@ -83,7 +105,7 @@ pub fn check_applied_agreement(
     );
 }
 
-/// The committed-entry registry (§4/M4): an entry is recorded the moment its
+/// The committed-entry registry: an entry is recorded the moment its
 /// index becomes `<= commit_index` on a leader committing in its own term
 /// (R19 — the only place commitment is ever DEFINED; followers merely learn
 /// of it). LeaderCompleteness/CommittedDurability v1 then demands every
@@ -135,5 +157,9 @@ impl CommittedRegistry {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&LogIndex, &Entry)> {
+        self.entries.iter()
     }
 }

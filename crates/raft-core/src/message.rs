@@ -1,10 +1,10 @@
-//! Raft messages plus the inputs and effects of the sans-I/O state machine.
+//! Messages, inputs, and effects for the pure state-machine boundary.
 //!
 //! This is the core's entire interface with the world: everything the node
 //! ever learns arrives as an [`Input`]; everything it ever wants done comes
 //! back as an [`Effect`]. Drivers execute effects strictly in emitted order,
 //! and every `Persist*` effect completes durably (fsync) before any subsequent
-//! `Send` in the same batch is transmitted (§2.4 contract, tested in M5).
+//! `Send` in the same batch is transmitted.
 
 use serde::{Deserialize, Serialize};
 
@@ -48,7 +48,7 @@ pub enum Input {
     /// A message arrived from a peer.
     Message { from: NodeId, msg: RaftMessage },
     /// Logical time advanced. The driver sends this every `TICK_MS`. Deadlines
-    /// are computed from `now_ms` inside the core (D-000): drivers never manage
+    /// are computed from `now_ms` inside the core: drivers never manage
     /// timers on the core's behalf, they only deliver ticks.
     Tick { now_ms: u64 },
     /// A client asked to execute a command (leader-only; see R20).
@@ -72,10 +72,10 @@ pub enum Effect {
     /// Apply this committed entry to the state machine, in index order (R4).
     Apply(Entry),
     /// The node's role changed (Follower/Candidate/Leader) — for logging/metrics
-    /// and for kv-node to fail pending client requests on step-down (§2.5).
+    /// and for a driver to fail pending client requests on step-down.
     RoleChanged { role_name: &'static str, term: Term },
     /// Leader accepted a ClientPropose and assigned it this log index; kv-node
-    /// uses it to register the pending client response (§2.5).
+    /// uses it to register the pending client response.
     ProposeAccepted { index: LogIndex },
     /// Not-leader proposals yield this instead, with the last known leader if any.
     ProposeRejected { leader_hint: Option<NodeId> },

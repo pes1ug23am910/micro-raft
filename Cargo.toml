@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
-# Deny warnings workspace-wide so every crate is held to the same standard.
+# Keep the entire workspace warning-free by default.
 [workspace.lints.rust]
 warnings = "deny"
 

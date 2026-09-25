@@ -1,14 +1,14 @@
 //! Durable storage for Raft's persistent state.
 //!
-//! Standalone module: no Raft logic. M5 wires it to the `Persist*` effects.
+//! This module contains no consensus logic; it only executes durable writes
+//! requested by the driver.
 //! Layout per node data dir:
 //! - `hardstate.json` — atomic-swap-updated JSON of [`HardState`]
 //! - `log.jsonl` — append-only, one CRC-framed JSON line per [`Entry`]:
 //!   `{"crc":<u32>,"entry":{...}}\n`, `crc` over the serialized entry bytes
 //!
-//! Known simplification (§4/M1): renames are not followed by a directory
-//! fsync — full rename durability differs per platform; documented honestly
-//! in the README (M7) rather than half-solved here.
+//! Renames are not followed by a directory fsync. Full rename durability
+//! differs by platform, and this implementation targets a local Windows demo.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -77,21 +77,21 @@ impl Storage {
         Ok((Storage { dir }, hard, entries))
     }
 
-    /// Atomic swap (§2.6): truncate-write `hardstate.json.new`, fsync, rename
+    /// Atomic swap: truncate-write `hardstate.json.new`, fsync, rename
     /// over `hardstate.json`. A crash leaves either the old or the new file,
     /// never a hybrid. `std::fs::rename` replaces the destination on Windows
-    /// (MoveFileEx semantics) — as long as the destination isn't open (§9).
+    /// (MoveFileEx semantics) as long as the destination is not open.
     pub fn save_hard_state(&mut self, hs: &HardState) -> io::Result<()> {
         let tmp = self.dir.join(HARDSTATE_NEW);
         let mut f = File::create(&tmp)?;
         f.write_all(serde_json::to_string(hs)?.as_bytes())?;
         f.sync_all()?;
-        drop(f); // Windows §9: close the handle before rename touches the path
+        drop(f); // Windows requires closing the handle before the rename.
         fs::rename(&tmp, self.dir.join(HARDSTATE))
     }
 
-    /// Optionally truncate the durable log from an index (R13's durable half,
-    /// rewrite-based — logs here are small; correctness over cleverness §2.6),
+    /// Optionally truncate the durable log from an index (conflict repair,
+    /// rewrite-based because logs in this project are deliberately small),
     /// then append. Every mutation ends in `sync_all` before returning:
     /// nothing may be acknowledged upstream that the disk hasn't confirmed.
     pub fn append_entries(
@@ -133,15 +133,15 @@ impl Storage {
         }
         f.write_all(buf.as_bytes())?;
         f.sync_all()?;
-        drop(f); // Windows §9: close before rename
+        drop(f); // Windows requires closing the handle before the rename.
         fs::rename(&tmp, self.dir.join(LOG))
     }
 }
 
-/// Torn-tail recovery (§2.6): stream `log.jsonl` line by line, verifying CRC
-/// and index contiguity. On the FIRST bad or partial line, physically truncate
-/// the file at that line's byte offset and stop — everything before it is the
-/// durable log; everything after it was never safely written.
+/// Torn-tail recovery scans `log.jsonl`, verifying CRC and index contiguity.
+/// An incomplete or invalid final frame can result from an interrupted append
+/// and is truncated. An invalid frame with data after it is interior
+/// corruption: recovery fails without modifying the file.
 fn recover_log(dir: &Path) -> io::Result<Vec<Entry>> {
     let path = dir.join(LOG);
     let bytes = match fs::read(&path) {
@@ -162,8 +162,17 @@ fn recover_log(dir: &Path) -> io::Result<Vec<Entry>> {
         match parse_frame(&rest[..nl], prev_index) {
             Ok(entry) => entries.push(entry),
             Err(why) => {
-                truncate_at(&path, offset, &why)?;
-                break;
+                let frame_end = offset + nl + 1;
+                if frame_end == bytes.len() {
+                    truncate_at(&path, offset, &why)?;
+                    break;
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "log.jsonl corrupt at byte offset {offset}: {why}; refusing to discard a durable suffix"
+                    ),
+                ));
             }
         }
         offset += nl + 1;
@@ -218,8 +227,8 @@ mod tests {
 
     /// Per-test data dir under the workspace-root `data/` (gitignored).
     /// Declare it BEFORE the `Storage` in each test so the `Storage` (and any
-    /// file handles) drop first: Windows refuses to remove a directory while
-    /// those files are still open.
+    /// file handles) drop first: Windows refuses to remove a directory whose
+    /// files are still open.
     struct TestDir(PathBuf);
 
     impl TestDir {
@@ -240,7 +249,10 @@ mod tests {
     impl Drop for TestDir {
         fn drop(&mut self) {
             if let Err(e) = fs::remove_dir_all(&self.0) {
-                eprintln!("warning: failed to remove test dir {}: {e}", self.0.display());
+                eprintln!(
+                    "warning: failed to remove test dir {}: {e}",
+                    self.0.display()
+                );
             }
         }
     }
@@ -289,7 +301,11 @@ mod tests {
         drop(s);
 
         let (_s, _, log) = Storage::open(dir.path()).unwrap();
-        assert_eq!(log.len(), 100, "all 100 entries survive 3 open/append cycles");
+        assert_eq!(
+            log.len(),
+            100,
+            "all 100 entries survive 3 open/append cycles"
+        );
         for (i, e) in log.iter().enumerate() {
             assert_eq!(e.index, i as u64 + 1, "strictly ordered, contiguous");
             assert_eq!(*e, entry(e.index, e.term), "content roundtrips exactly");
@@ -345,10 +361,55 @@ mod tests {
     }
 
     #[test]
+    fn interior_corruption_fails_without_modifying_log() {
+        let dir = TestDir::new();
+        let (mut storage, _, _) = Storage::open(dir.path()).unwrap();
+        storage.append_entries(None, &entries(1..=3, 1)).unwrap();
+        drop(storage);
+
+        let log_path = dir.path().join(LOG);
+        let mut corrupted = fs::read(&log_path).unwrap();
+        let first_end = corrupted.iter().position(|&b| b == b'\n').unwrap() + 1;
+        let second_end = first_end
+            + corrupted[first_end..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .unwrap()
+            + 1;
+        let payload_at = first_end
+            + corrupted[first_end..second_end]
+                .windows(8)
+                .position(|w| w == b"\"entry\":")
+                .expect("frame format carries an entry field")
+            + 8
+            + 10;
+        corrupted[payload_at] ^= 0x01;
+        fs::write(&log_path, &corrupted).unwrap();
+
+        let error = match Storage::open(dir.path()) {
+            Ok(_) => panic!("interior corruption must fail recovery"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error
+            .to_string()
+            .contains("refusing to discard a durable suffix"));
+        assert_eq!(
+            fs::read(&log_path).unwrap(),
+            corrupted,
+            "failed recovery must leave the corrupt file untouched"
+        );
+    }
+
+    #[test]
     fn hardstate_persist_roundtrip() {
         let dir = TestDir::new();
         let (mut s, hard, _) = Storage::open(dir.path()).unwrap();
-        assert_eq!(hard, HardState::default(), "missing file recovers {{0, null}}");
+        assert_eq!(
+            hard,
+            HardState::default(),
+            "missing file recovers {{0, null}}"
+        );
         s.save_hard_state(&HardState {
             current_term: 7,
             voted_for: Some(2),
@@ -383,12 +444,56 @@ mod tests {
     }
 
     #[test]
+    fn hardstate_replaces_existing_file_repeatedly() {
+        let dir = TestDir::new();
+        let (mut storage, _, _) = Storage::open(dir.path()).unwrap();
+        for term in 1..=5 {
+            storage
+                .save_hard_state(&HardState {
+                    current_term: term,
+                    voted_for: Some((term % 3 + 1) as u8),
+                })
+                .unwrap();
+        }
+        drop(storage);
+
+        let (_storage, hard, _) = Storage::open(dir.path()).unwrap();
+        assert_eq!(hard.current_term, 5);
+        assert_eq!(hard.voted_for, Some(3));
+    }
+
+    #[test]
+    fn failed_hardstate_swap_preserves_previous_state() {
+        let dir = TestDir::new();
+        let (mut storage, _, _) = Storage::open(dir.path()).unwrap();
+        let original = HardState {
+            current_term: 4,
+            voted_for: Some(2),
+        };
+        storage.save_hard_state(&original).unwrap();
+
+        let blocked_temp = dir.path().join(HARDSTATE_NEW);
+        fs::create_dir(&blocked_temp).unwrap();
+        let result = storage.save_hard_state(&HardState {
+            current_term: 5,
+            voted_for: Some(3),
+        });
+        assert!(result.is_err(), "the filesystem failure must be returned");
+        fs::remove_dir(&blocked_temp).unwrap();
+        drop(storage);
+
+        let (_storage, recovered, _) = Storage::open(dir.path()).unwrap();
+        assert_eq!(recovered, original, "the last completed swap remains valid");
+    }
+
+    #[test]
     fn truncate_from_rewrites_suffix() {
         let dir = TestDir::new();
         let (mut s, _, _) = Storage::open(dir.path()).unwrap();
         s.append_entries(None, &entries(1..=10, 1)).unwrap();
-        // The shape of R13 conflict repair: drop 6..=10, install a newer-term tail.
-        s.append_entries(Some(6), &[entry(6, 2), entry(7, 2)]).unwrap();
+        // Conflict repair drops 6..=10 and installs a newer-term tail.
+        s.append_entries(Some(6), &[entry(6, 2), entry(7, 2)])
+            .unwrap();
         drop(s);
 
         let (_s, _, log) = Storage::open(dir.path()).unwrap();
@@ -397,7 +502,14 @@ mod tests {
             log.iter().map(|e| e.index).collect::<Vec<_>>(),
             (1..=7).collect::<Vec<_>>()
         );
-        assert_eq!(log[4].term, 1, "prefix below the truncation point untouched");
-        assert_eq!((log[5].term, log[6].term), (2, 2), "new tail carries the new term");
+        assert_eq!(
+            log[4].term, 1,
+            "prefix below the truncation point untouched"
+        );
+        assert_eq!(
+            (log[5].term, log[6].term),
+            (2, 2),
+            "new tail carries the new term"
+        );
     }
 }

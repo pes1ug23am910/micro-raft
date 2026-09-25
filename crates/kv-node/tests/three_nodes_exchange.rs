@@ -1,34 +1,33 @@
-//! M2 acceptance: three in-process nodes on real localhost sockets (ports
-//! 7101–7103) exchange frames; killing one node's tasks and restarting them
+//! Three in-process nodes on real localhost sockets exchange
+//! frames; killing one node's tasks and restarting them on the same port
 //! resumes flow — the per-peer dial/backoff loop reconnects on its own.
 
 use std::collections::BTreeSet;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpListener as PortReservation};
 use std::time::Duration;
 
-use kv_node::transport::{spawn_listener, TcpTransport, Transport};
+use kv_node::transport::{spawn_listener, TcpTransport, Transport, INBOUND_QUEUE_CAPACITY};
 use raft_core::{NodeId, RaftMessage};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, timeout};
 
-const NODES: [(NodeId, u16); 3] = [(1, 7101), (2, 7102), (3, 7103)];
+type Nodes = [(NodeId, u16); 3];
 
 struct TestNode {
-    inbound: mpsc::UnboundedReceiver<(NodeId, RaftMessage)>,
+    inbound: mpsc::Receiver<(NodeId, RaftMessage)>,
     listener: tokio::task::JoinHandle<()>,
     pinger: tokio::task::JoinHandle<()>,
 }
 
-/// Listener + per-peer transports + a 10 Hz ping task (the --ping mode's
-/// in-process equivalent) for one node.
-async fn start_node(id: NodeId) -> TestNode {
-    let port = NODES.iter().find(|(n, _)| *n == id).unwrap().1;
-    let peers: Vec<(NodeId, SocketAddr)> = NODES
+/// Listener, per-peer transports, and a 10 Hz test-message task for one node.
+async fn start_node(id: NodeId, nodes: &Nodes) -> TestNode {
+    let port = nodes.iter().find(|(n, _)| *n == id).unwrap().1;
+    let peers: Vec<(NodeId, SocketAddr)> = nodes
         .iter()
         .filter(|(n, _)| *n != id)
         .map(|&(n, port)| (n, SocketAddr::from(([127, 0, 0, 1], port))))
         .collect();
-    let (tx, inbound) = mpsc::unbounded_channel();
+    let (tx, inbound) = mpsc::channel(INBOUND_QUEUE_CAPACITY);
     let listener = spawn_listener(port, tx).await.expect("bind test port");
     let transport = TcpTransport::spawn(id, &peers);
     let peer_ids: Vec<NodeId> = peers.iter().map(|&(n, _)| n).collect();
@@ -53,6 +52,27 @@ async fn start_node(id: NodeId) -> TestNode {
     }
 }
 
+fn reserve_node_ports() -> (Nodes, [PortReservation; 3]) {
+    let reservations = std::array::from_fn(|_| {
+        PortReservation::bind(("127.0.0.1", 0)).expect("reserve ephemeral test port")
+    });
+    let nodes = std::array::from_fn(|index| {
+        let port = reservations[index]
+            .local_addr()
+            .expect("read reserved test address")
+            .port();
+        ((index + 1) as NodeId, port)
+    });
+    (nodes, reservations)
+}
+
+async fn start_reserved_node(id: NodeId, nodes: &Nodes, reservation: PortReservation) -> TestNode {
+    let port = nodes.iter().find(|(n, _)| *n == id).unwrap().1;
+    assert_eq!(reservation.local_addr().unwrap().port(), port);
+    drop(reservation);
+    start_node(id, nodes).await
+}
+
 impl TestNode {
     /// Abort this node's tasks; dropping the struct closes its channels, so
     /// its transport tasks and inbound connections wind down too.
@@ -65,7 +85,7 @@ impl TestNode {
         while self.inbound.try_recv().is_ok() {}
     }
 
-    /// Wait (≤5 s per §4/M2) until traffic from every node in `expect` arrives.
+    /// Wait up to five seconds for traffic from every node in `expect`.
     async fn expect_traffic_from(&mut self, me: NodeId, expect: &[NodeId]) {
         let want: BTreeSet<NodeId> = expect.iter().copied().collect();
         let mut seen: BTreeSet<NodeId> = BTreeSet::new();
@@ -82,7 +102,7 @@ impl TestNode {
         .await
         .is_ok();
         assert!(
-            ok,
+            ok && seen.is_superset(&want),
             "node {me}: expected traffic from {want:?} within 5s, saw only {seen:?}"
         );
     }
@@ -90,9 +110,11 @@ impl TestNode {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn three_nodes_exchange() {
-    let mut n1 = start_node(1).await;
-    let mut n2 = start_node(2).await;
-    let mut n3 = start_node(3).await;
+    let (nodes, reservations) = reserve_node_ports();
+    let [port1, port2, port3] = reservations;
+    let mut n1 = start_reserved_node(1, &nodes, port1).await;
+    let mut n2 = start_reserved_node(2, &nodes, port2).await;
+    let mut n3 = start_reserved_node(3, &nodes, port3).await;
 
     // Phase 1: within 5 s every node has received messages from both peers.
     n1.expect_traffic_from(1, &[2, 3]).await;
@@ -109,7 +131,7 @@ async fn three_nodes_exchange() {
 
     // Phase 3: restart node 3 on the same port; the survivors' dial/backoff
     // loops must reconnect and traffic must flow in both directions again.
-    let mut n3 = start_node(3).await;
+    let mut n3 = start_node(3, &nodes).await;
     n3.expect_traffic_from(3, &[1, 2]).await;
     n1.expect_traffic_from(1, &[3]).await;
     n2.expect_traffic_from(2, &[3]).await;

@@ -4,5 +4,7 @@
 
 pub mod crc;
 pub mod driver;
+pub mod http;
+pub mod kv;
 pub mod storage;
 pub mod transport;

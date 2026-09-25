@@ -4,7 +4,10 @@
 use raft_core::{Command, Entry, HardState, LogIndex, RaftMessage, Role, Term};
 use sim::Sim;
 
-fn noop_entries(range: std::ops::RangeInclusive<u64>, term_of: impl Fn(LogIndex) -> Term) -> Vec<Entry> {
+fn noop_entries(
+    range: std::ops::RangeInclusive<u64>,
+    term_of: impl Fn(LogIndex) -> Term,
+) -> Vec<Entry> {
     range
         .map(|index| Entry {
             index,
@@ -176,7 +179,10 @@ fn rejected_vote_does_not_reset_timer() {
     sim.run_ms(raft_core::TICK_MS);
     let deadline_2 = sim.node(2).election_deadline();
     let deadline_3 = sim.node(3).election_deadline();
-    assert!(deadline_2 > 0 && deadline_3 > 0, "seed={seed}: deadlines drawn");
+    assert!(
+        deadline_2 > 0 && deadline_3 > 0,
+        "seed={seed}: deadlines drawn"
+    );
 
     // Only node 1's clock runs; it campaigns (repeatedly). 2 and 3 receive
     // the solicitations while frozen and refuse them.
