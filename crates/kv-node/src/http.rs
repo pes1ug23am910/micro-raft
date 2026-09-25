@@ -51,13 +51,13 @@ struct WriteOk {
 }
 
 #[derive(Serialize)]
-struct NotLeader {
+struct ProposalError {
     error: &'static str,
     leader_hint: Option<NodeId>,
 }
 
 #[derive(Serialize)]
-struct TimeoutError {
+struct ApiError {
     error: &'static str,
 }
 
@@ -80,35 +80,53 @@ async fn delete_key(State(state): State<ApiState>, Path(key): Path<String>) -> R
 }
 
 async fn submit(state: &ApiState, command: Command) -> Response {
+    let deadline = tokio::time::Instant::now() + WRITE_TIMEOUT;
     let (respond_to, response) = oneshot::channel();
     let request = ProposalRequest {
         command,
         respond_to,
     };
-    let result = tokio::time::timeout(WRITE_TIMEOUT, async {
-        state.proposals.send(request).await.map_err(|_| ())?;
-        response.await.map_err(|_| ())
-    })
-    .await;
 
-    match result {
+    match tokio::time::timeout_at(deadline, state.proposals.send(request)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => return api_error("unavailable"),
+        // Cancelling a pending Tokio mpsc send leaves the request out of the
+        // queue, so this timeout is known not to have reached the driver.
+        Err(_) => return api_error("timeout"),
+    }
+
+    match tokio::time::timeout_at(deadline, response).await {
         Ok(Ok(ProposalResult::Applied { index })) => {
             (StatusCode::OK, Json(WriteOk { ok: true, index })).into_response()
         }
         Ok(Ok(ProposalResult::NotLeader { leader_hint })) => (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(NotLeader {
+            Json(ProposalError {
                 error: "not_leader",
                 leader_hint,
             }),
         )
             .into_response(),
-        Ok(Err(())) | Err(_) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(TimeoutError { error: "timeout" }),
-        )
-            .into_response(),
+        Ok(Ok(ProposalResult::OutcomeUnknown { leader_hint })) => outcome_unknown(leader_hint),
+        // The driver accepted the queue item, so a lost sender or elapsed
+        // deadline cannot safely be treated as a rejection: it may commit.
+        Ok(Err(_)) | Err(_) => outcome_unknown(state.shared.status().leader_hint),
     }
+}
+
+fn api_error(error: &'static str) -> Response {
+    (StatusCode::SERVICE_UNAVAILABLE, Json(ApiError { error })).into_response()
+}
+
+fn outcome_unknown(leader_hint: Option<NodeId>) -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(ProposalError {
+            error: "outcome_unknown",
+            leader_hint,
+        }),
+    )
+        .into_response()
 }
 
 async fn get_key(State(state): State<ApiState>, Path(key): Path<String>) -> Response {
@@ -141,7 +159,7 @@ async fn get_key(State(state): State<ApiState>, Path(key): Path<String>) -> Resp
 fn key_too_large() -> Response {
     (
         StatusCode::PAYLOAD_TOO_LARGE,
-        Json(TimeoutError {
+        Json(ApiError {
             error: "key_too_large",
         }),
     )
@@ -215,6 +233,61 @@ mod tests {
             serde_json::json!({"error": "not_leader", "leader_hint": 2})
         );
         responder.await.expect("responder");
+    }
+
+    #[tokio::test]
+    async fn accepted_but_unresolved_proposal_reports_outcome_unknown() {
+        let (api, mut proposals) = api();
+        let responder = tokio::spawn(async move {
+            let request = proposals.recv().await.expect("proposal");
+            request
+                .respond_to
+                .send(ProposalResult::OutcomeUnknown {
+                    leader_hint: Some(3),
+                })
+                .expect("handler waiting");
+        });
+
+        let response = delete_key(State(api), Path("k".into())).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), 1024).await.expect("body");
+        let json: Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(
+            json,
+            serde_json::json!({"error": "outcome_unknown", "leader_hint": 3})
+        );
+        responder.await.expect("responder");
+    }
+
+    #[tokio::test]
+    async fn lost_completion_after_enqueue_reports_outcome_unknown() {
+        let (api, mut proposals) = api();
+        let responder = tokio::spawn(async move {
+            let request = proposals.recv().await.expect("proposal");
+            drop(request.respond_to);
+        });
+
+        let response = delete_key(State(api), Path("k".into())).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), 1024).await.expect("body");
+        let json: Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(
+            json,
+            serde_json::json!({"error": "outcome_unknown", "leader_hint": null})
+        );
+        responder.await.expect("responder");
+    }
+
+    #[tokio::test]
+    async fn closed_proposal_queue_reports_unavailable() {
+        let (api, proposals) = api();
+        drop(proposals);
+
+        let response = delete_key(State(api), Path("k".into())).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), 1024).await.expect("body");
+        let json: Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json, serde_json::json!({"error": "unavailable"}));
     }
 
     #[tokio::test]

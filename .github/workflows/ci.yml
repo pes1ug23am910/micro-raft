@@ -18,7 +18,7 @@ jobs:
   quality:
     name: Format, lint, and debug tests
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -35,12 +35,12 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Run debug tests
-        run: cargo test --workspace --all-targets --locked
+        run: cargo test --workspace --all-targets --all-features --locked
 
   release-chaos:
     name: Release-mode test suite
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -50,4 +50,4 @@ jobs:
         with:
           toolchain: 1.96.0
       - name: Run full release suite, including deterministic chaos tests
-        run: cargo test --workspace --all-targets --release --locked
+        run: cargo test --workspace --all-targets --all-features --release --locked

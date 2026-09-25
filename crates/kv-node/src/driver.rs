@@ -38,8 +38,17 @@ pub struct ProposalRequest {
 /// Completion observed by the HTTP request that submitted a proposal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProposalResult {
-    Applied { index: LogIndex },
-    NotLeader { leader_hint: Option<NodeId> },
+    Applied {
+        index: LogIndex,
+    },
+    NotLeader {
+        leader_hint: Option<NodeId>,
+    },
+    /// The proposal was accepted, but the driver can no longer prove whether
+    /// it committed and applied. Retrying the command may therefore repeat it.
+    OutcomeUnknown {
+        leader_hint: Option<NodeId>,
+    },
 }
 
 type PendingWrites = BTreeMap<LogIndex, oneshot::Sender<ProposalResult>>;
@@ -104,19 +113,50 @@ pub async fn run_driver<T: Transport>(
                 )?;
             }
             Some(request) = proposal_rx.recv() => {
-                step_and_execute(
+                process_proposal_request(
                     &mut node,
                     &mut storage,
                     &transport,
                     &shared,
                     &mut pending,
                     &mut last_known_leader,
-                    Input::ClientPropose { command: request.command },
-                    Some(request.respond_to),
+                    request,
                 )?;
             }
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_proposal_request(
+    node: &mut RaftNode,
+    storage: &mut Storage,
+    transport: &impl Transport,
+    shared: &SharedReadState,
+    pending: &mut PendingWrites,
+    last_known_leader: &mut Option<NodeId>,
+    request: ProposalRequest,
+) -> io::Result<()> {
+    // HTTP drops this receiver when its deadline expires. If that happened
+    // while the request waited in the bounded queue, it is still safe to skip
+    // the proposal entirely because the core has not seen it yet.
+    if request.respond_to.is_closed() {
+        debug!("expired client request skipped before proposal");
+        return Ok(());
+    }
+
+    step_and_execute(
+        node,
+        storage,
+        transport,
+        shared,
+        pending,
+        last_known_leader,
+        Input::ClientPropose {
+            command: request.command,
+        },
+        Some(request.respond_to),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -227,7 +267,7 @@ fn execute_in_order(
             Effect::RoleChanged { role_name, term } => {
                 info!(role = role_name, term, "role changed");
                 if role_name != "Leader" {
-                    fail_pending(pending, *last_known_leader);
+                    mark_pending_outcomes_unknown(pending, *last_known_leader);
                 }
             }
             Effect::Apply(entry) => {
@@ -275,9 +315,9 @@ fn execute_in_order(
     Ok(())
 }
 
-fn fail_pending(pending: &mut PendingWrites, leader_hint: Option<NodeId>) {
+fn mark_pending_outcomes_unknown(pending: &mut PendingWrites, leader_hint: Option<NodeId>) {
     for (_, respond_to) in std::mem::take(pending) {
-        let _ = respond_to.send(ProposalResult::NotLeader { leader_hint });
+        let _ = respond_to.send(ProposalResult::OutcomeUnknown { leader_hint });
     }
 }
 
@@ -288,7 +328,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use raft_core::{Entry, HardState};
+    use raft_core::{Entry, HardState, Role};
 
     use super::*;
 
@@ -424,6 +464,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn storage_failure_leaves_in_flight_proposal_outcome_unresolved() {
+        let dir = TestDir::new();
+        let (mut storage, _, _) = Storage::open(dir.path()).expect("open storage");
+        fs::create_dir(dir.path().join("log.jsonl")).expect("block log file creation");
+        let mut node = RaftNode::new(1, vec![2, 3], 3);
+        node.hard.current_term = 1;
+        node.role = Role::Leader {
+            next_index: BTreeMap::from([(2, 1), (3, 1)]),
+            match_index: BTreeMap::from([(2, 0), (3, 0)]),
+        };
+        let shared = SharedReadState::from_node(&node);
+        let transport = RecordingTransport::default();
+        let mut pending = PendingWrites::new();
+        let mut last_known_leader = None;
+        let (respond_to, response) = oneshot::channel();
+
+        let result = process_proposal_request(
+            &mut node,
+            &mut storage,
+            &transport,
+            &shared,
+            &mut pending,
+            &mut last_known_leader,
+            ProposalRequest {
+                command: Command::Put {
+                    key: "k".into(),
+                    value: "v".into(),
+                },
+                respond_to,
+            },
+        );
+
+        assert!(result.is_err(), "the storage error terminates the driver");
+        assert_eq!(node.log.len(), 1, "the core already saw the proposal");
+        assert!(pending.is_empty(), "acceptance was not completed");
+        assert!(
+            response.await.is_err(),
+            "the lost completion maps to outcome_unknown at the HTTP boundary"
+        );
+    }
+
+    #[tokio::test]
     async fn client_completes_only_when_its_entry_is_applied() {
         let dir = TestDir::new();
         let (mut storage, _, _) = Storage::open(dir.path()).expect("open storage");
@@ -499,8 +581,50 @@ mod tests {
         assert!(pending.is_empty());
     }
 
+    #[test]
+    fn expired_queued_client_is_skipped_before_proposal() {
+        let dir = TestDir::new();
+        let (mut storage, _, _) = Storage::open(dir.path()).expect("open storage");
+        let mut node = RaftNode::new(1, vec![2, 3], 3);
+        node.hard.current_term = 1;
+        node.role = Role::Leader {
+            next_index: BTreeMap::from([(2, 1), (3, 1)]),
+            match_index: BTreeMap::from([(2, 0), (3, 0)]),
+        };
+        let shared = SharedReadState::from_node(&node);
+        let transport = RecordingTransport::default();
+        let mut pending = PendingWrites::new();
+        let mut last_known_leader = None;
+        let (respond_to, response) = oneshot::channel();
+        drop(response);
+
+        process_proposal_request(
+            &mut node,
+            &mut storage,
+            &transport,
+            &shared,
+            &mut pending,
+            &mut last_known_leader,
+            ProposalRequest {
+                command: Command::Put {
+                    key: "k".into(),
+                    value: "v".into(),
+                },
+                respond_to,
+            },
+        )
+        .expect("skip expired proposal");
+
+        assert!(node.log.is_empty(), "the command never entered the core");
+        assert!(pending.is_empty());
+        assert!(transport.0.lock().expect("transport lock").is_empty());
+        drop(storage);
+        let (_storage, _, recovered) = Storage::open(dir.path()).expect("reopen storage");
+        assert!(recovered.is_empty(), "the command was not persisted");
+    }
+
     #[tokio::test]
-    async fn stepping_down_fails_all_pending_clients() {
+    async fn stepping_down_marks_pending_outcomes_unknown() {
         let dir = TestDir::new();
         let (mut storage, _, _) = Storage::open(dir.path()).expect("open storage");
         let node = RaftNode::new(1, vec![2, 3], 3);
@@ -527,7 +651,7 @@ mod tests {
         assert!(pending.is_empty());
         assert_eq!(
             response.await.expect("completion"),
-            ProposalResult::NotLeader {
+            ProposalResult::OutcomeUnknown {
                 leader_hint: Some(3)
             }
         );

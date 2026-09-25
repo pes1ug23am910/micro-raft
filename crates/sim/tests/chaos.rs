@@ -192,19 +192,44 @@ fn run_chaos_seed(seed: u64, duration_ms: u64) {
     }
 }
 
-#[test]
-fn soak_200_seeds_all_invariants() {
-    for seed in 0..200 {
+fn requested_replay_seed() -> Option<u64> {
+    match std::env::var("MICRO_RAFT_SEED") {
+        Ok(raw) => Some(raw.parse::<u64>().unwrap_or_else(|error| {
+            panic!("MICRO_RAFT_SEED must be a decimal u64, got {raw:?}: {error}")
+        })),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("MICRO_RAFT_SEED must be valid Unicode containing a decimal u64")
+        }
+    }
+}
+
+fn run_seed_set(default_end: u64) {
+    if let Some(seed) = requested_replay_seed() {
+        run_chaos_seed(seed, 60_000);
+        return;
+    }
+    for seed in 0..default_end {
         run_chaos_seed(seed, 60_000);
     }
+}
+
+/// Replay one reported seed in PowerShell with:
+///
+/// ```powershell
+/// $env:MICRO_RAFT_SEED='137'; cargo test -p sim --release --test chaos soak_200_seeds_all_invariants -- --exact --nocapture
+/// ```
+///
+/// Without the variable, the complete 0..200 schedule runs unchanged.
+#[test]
+fn soak_200_seeds_all_invariants() {
+    run_seed_set(200);
 }
 
 #[test]
 #[ignore = "extended deterministic soak; run explicitly before release"]
 fn soak_extended() {
-    for seed in 0..1_000 {
-        run_chaos_seed(seed, 60_000);
-    }
+    run_seed_set(1_000);
 }
 
 #[test]

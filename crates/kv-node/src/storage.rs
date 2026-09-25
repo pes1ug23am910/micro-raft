@@ -139,9 +139,9 @@ impl Storage {
 }
 
 /// Torn-tail recovery scans `log.jsonl`, verifying CRC and index contiguity.
-/// An incomplete or invalid final frame can result from an interrupted append
-/// and is truncated. An invalid frame with data after it is interior
-/// corruption: recovery fails without modifying the file.
+/// Only an unterminated final tail can result from an interrupted append and
+/// is truncated. Every newline-terminated invalid frame is durable corruption:
+/// recovery fails without modifying the file, even when it is the final frame.
 fn recover_log(dir: &Path) -> io::Result<Vec<Entry>> {
     let path = dir.join(LOG);
     let bytes = match fs::read(&path) {
@@ -162,15 +162,10 @@ fn recover_log(dir: &Path) -> io::Result<Vec<Entry>> {
         match parse_frame(&rest[..nl], prev_index) {
             Ok(entry) => entries.push(entry),
             Err(why) => {
-                let frame_end = offset + nl + 1;
-                if frame_end == bytes.len() {
-                    truncate_at(&path, offset, &why)?;
-                    break;
-                }
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
-                        "log.jsonl corrupt at byte offset {offset}: {why}; refusing to discard a durable suffix"
+                        "log.jsonl corrupt at byte offset {offset}: {why}; refusing to modify newline-terminated data"
                     ),
                 ));
             }
@@ -206,7 +201,7 @@ fn truncate_at(path: &Path, offset: usize, why: &str) -> io::Result<()> {
         path = %path.display(),
         offset,
         why,
-        "torn tail: truncating log at first bad line"
+        "torn tail: truncating unterminated final log data"
     );
     let f = OpenOptions::new().write(true).open(path)?;
     f.set_len(offset as u64)?;
@@ -281,6 +276,33 @@ mod tests {
             .map_or(0, |p| p + 1)
     }
 
+    fn assert_invalid_recovery_preserves_file(
+        dir: &TestDir,
+        expected_bytes: &[u8],
+        expected_reason: &str,
+    ) {
+        let error = match Storage::open(dir.path()) {
+            Ok(_) => panic!("newline-terminated corruption must fail recovery"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error.to_string().contains(expected_reason),
+            "unexpected recovery error: {error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("refusing to modify newline-terminated data"),
+            "unexpected recovery error: {error}"
+        );
+        assert_eq!(
+            fs::read(dir.path().join(LOG)).unwrap(),
+            expected_bytes,
+            "failed recovery must leave the corrupt file untouched"
+        );
+    }
+
     #[test]
     fn log_roundtrip_replay() {
         let dir = TestDir::new();
@@ -313,8 +335,8 @@ mod tests {
     }
 
     #[test]
-    fn torn_tail_truncated_on_recovery() {
-        // (a) Crash mid-append: the file ends in a partial line.
+    fn unterminated_tail_is_truncated_on_recovery() {
+        // Crash mid-append: the file ends in a partial line.
         let dir = TestDir::new();
         let (mut s, _, _) = Storage::open(dir.path()).unwrap();
         s.append_entries(None, &entries(1..=10, 1)).unwrap();
@@ -337,27 +359,59 @@ mod tests {
             lls as u64,
             "file must be physically truncated at the bad line's offset"
         );
+    }
 
-        // (b) Bit rot: a byte flipped inside the last line's entry payload.
-        let dir2 = TestDir::new();
-        let (mut s2, _, _) = Storage::open(dir2.path()).unwrap();
-        s2.append_entries(None, &entries(1..=10, 1)).unwrap();
-        drop(s2);
-        let log_path2 = dir2.path().join("log.jsonl");
-        let mut bytes2 = fs::read(&log_path2).unwrap();
-        let lls2 = last_line_start(&bytes2);
-        let payload_at = lls2
-            + bytes2[lls2..]
+    #[test]
+    fn newline_terminated_final_crc_error_fails_without_modifying_log() {
+        let dir = TestDir::new();
+        let (mut storage, _, _) = Storage::open(dir.path()).unwrap();
+        storage.append_entries(None, &entries(1..=10, 1)).unwrap();
+        drop(storage);
+
+        let log_path = dir.path().join(LOG);
+        let mut corrupted = fs::read(&log_path).unwrap();
+        let last_start = last_line_start(&corrupted);
+        let payload_at = last_start
+            + corrupted[last_start..]
                 .windows(8)
                 .position(|w| w == b"\"entry\":")
                 .expect("frame format carries an entry field")
             + 8
             + 10;
-        bytes2[payload_at] ^= 0x01;
-        fs::write(&log_path2, &bytes2).unwrap();
-        let (_s2, _, log2) = Storage::open(dir2.path()).unwrap();
-        assert_eq!(log2.len(), 9, "corrupted last line must be cut");
-        assert_eq!(fs::metadata(&log_path2).unwrap().len(), lls2 as u64);
+        corrupted[payload_at] ^= 0x01;
+        fs::write(&log_path, &corrupted).unwrap();
+
+        assert_invalid_recovery_preserves_file(&dir, &corrupted, "crc mismatch");
+    }
+
+    #[test]
+    fn newline_terminated_final_json_error_fails_without_modifying_log() {
+        let dir = TestDir::new();
+        let (mut storage, _, _) = Storage::open(dir.path()).unwrap();
+        storage.append_entries(None, &entries(1..=2, 1)).unwrap();
+        drop(storage);
+
+        let log_path = dir.path().join(LOG);
+        let mut corrupted = fs::read(&log_path).unwrap();
+        corrupted.extend_from_slice(b"{not-json}\n");
+        fs::write(&log_path, &corrupted).unwrap();
+
+        assert_invalid_recovery_preserves_file(&dir, &corrupted, "unparseable frame");
+    }
+
+    #[test]
+    fn newline_terminated_final_index_gap_fails_without_modifying_log() {
+        let dir = TestDir::new();
+        let (mut storage, _, _) = Storage::open(dir.path()).unwrap();
+        storage.append_entries(None, &entries(1..=2, 1)).unwrap();
+        drop(storage);
+
+        let log_path = dir.path().join(LOG);
+        let mut corrupted = fs::read(&log_path).unwrap();
+        corrupted.extend_from_slice(frame_line(&entry(4, 1)).unwrap().as_bytes());
+        fs::write(&log_path, &corrupted).unwrap();
+
+        assert_invalid_recovery_preserves_file(&dir, &corrupted, "index gap: 4 follows 2");
     }
 
     #[test]
@@ -393,7 +447,7 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(error
             .to_string()
-            .contains("refusing to discard a durable suffix"));
+            .contains("refusing to modify newline-terminated data"));
         assert_eq!(
             fs::read(&log_path).unwrap(),
             corrupted,

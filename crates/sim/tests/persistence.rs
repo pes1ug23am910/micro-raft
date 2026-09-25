@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use raft_core::rng::Pcg32;
-use raft_core::{Effect, HardState, RaftMessage};
+use raft_core::{Command, Effect, Entry, HardState, RaftMessage};
 use sim::{audit_persist_before_send, PersistenceMode, Sim};
 
 fn elect(sim: &mut Sim, seed: u64) -> u8 {
@@ -115,6 +115,57 @@ fn higher_term_is_durable_before_role_change() {
     assert!(
         persisted < changed,
         "term persistence must precede RoleChanged"
+    );
+}
+
+#[test]
+fn malformed_append_entries_leaves_core_and_virtual_disk_untouched() {
+    let mut sim = Sim::new(3, 93);
+    let hard = HardState {
+        current_term: 3,
+        voted_for: Some(1),
+    };
+    let log = vec![Entry {
+        index: 1,
+        term: 2,
+        command: Command::NoOp,
+    }];
+    sim.seed_hard_state(1, hard.clone());
+    sim.seed_log(1, log.clone());
+
+    let effects = sim.deliver_now(
+        2,
+        1,
+        RaftMessage::AppendEntries {
+            term: 9,
+            leader_id: 2,
+            prev_log_index: 0,
+            prev_log_term: 0,
+            entries: vec![Entry {
+                index: 0,
+                term: 9,
+                command: Command::NoOp,
+            }],
+            leader_commit: u64::MAX,
+        },
+    );
+
+    assert_eq!(sim.node(1).hard, hard);
+    assert_eq!(sim.durable_hard_state(1), &hard);
+    assert_eq!(sim.node(1).log, log);
+    assert_eq!(sim.durable_log(1), log);
+    assert_eq!(sim.node(1).commit_index, 0);
+    assert!(sim.applied(1).is_empty());
+    assert_eq!(
+        effects,
+        vec![Effect::Send {
+            to: 2,
+            msg: RaftMessage::AppendEntriesReply {
+                term: 3,
+                success: false,
+                match_index: 1,
+            },
+        }]
     );
 }
 

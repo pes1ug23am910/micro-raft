@@ -36,8 +36,8 @@ pub enum RaftMessage {
         term: Term,
         success: bool,
         /// On success: index of the last entry the follower now matches.
-        /// On failure: the follower's suggestion for where to retry (its log
-        /// length, i.e. last index + 1 clamped to >= 1) — a simple backoff hint.
+        /// On failure: the follower's last log index. The leader retries from
+        /// the following index, while still backing off at least one position.
         match_index: LogIndex,
     },
 }

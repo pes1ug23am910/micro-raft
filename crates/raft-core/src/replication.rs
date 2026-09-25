@@ -1,15 +1,37 @@
-//! Log replication and commitment: elections first need
-//! AppendEntries as heartbeats (R17 with empty entries, real `prev_log_*`),
-//! follower timing acceptance (R6b) and candidate step-down (R11).
-//!
-//! The complete path adds the consistency check (R12), conflict truncation + append (R13),
-//! follower commit update (R14), leader bookkeeping and backoff (R18), the
-//! pure `commit_advance` function (R19),
-//! client proposals (R20), and the leader NoOp completing R16.
+//! Log replication and commitment: consistency checks, conflict repair,
+//! follower commit updates, leader progress tracking, client proposals, and
+//! the current-term rule for advancing `commit_index`.
 
 use crate::message::{Effect, RaftMessage};
 use crate::types::{Command, Entry, LogIndex, NodeId, Role, Term};
 use crate::{RaftNode, MAX_APPEND_ENTRIES};
+
+/// Validate the structural framing of an `AppendEntries` payload and return
+/// the last index covered by the RPC. An empty heartbeat covers its anchor.
+/// Indices must be contiguous without overflow, and terms must be
+/// nondecreasing from the anchor without exceeding the leader's current term.
+pub(crate) fn validate_append_entries(
+    message_term: Term,
+    prev_log_index: LogIndex,
+    prev_log_term: Term,
+    entries: &[Entry],
+) -> Option<LogIndex> {
+    if prev_log_term > message_term {
+        return None;
+    }
+    let entries_len = LogIndex::try_from(entries.len()).ok()?;
+    let last_index = prev_log_index.checked_add(entries_len)?;
+    let mut previous_term = prev_log_term;
+    for (offset, entry) in entries.iter().enumerate() {
+        let offset = LogIndex::try_from(offset).ok()?;
+        let expected = prev_log_index.checked_add(1)?.checked_add(offset)?;
+        if entry.index != expected || entry.term < previous_term || entry.term > message_term {
+            return None;
+        }
+        previous_term = entry.term;
+    }
+    Some(last_index)
+}
 
 /// R19 as a pure function so the commitment rule is independently testable.
 ///
@@ -112,6 +134,7 @@ impl RaftNode {
         prev_log_index: LogIndex,
         prev_log_term: Term,
         entries: Vec<Entry>,
+        payload_last_index: LogIndex,
         leader_commit: LogIndex,
         effects: &mut Vec<Effect>,
     ) {
@@ -122,7 +145,7 @@ impl RaftNode {
                 msg: RaftMessage::AppendEntriesReply {
                     term: self.hard.current_term,
                     success: false,
-                    match_index: self.last_log_index() + 1,
+                    match_index: self.last_log_index(),
                 },
             });
             return;
@@ -130,15 +153,15 @@ impl RaftNode {
         // term == current_term here (R2 equalized anything newer): someone
         // legitimately leads this term. R11: a candidate steps down.
         self.become_follower(effects);
-        // R6b: ANY AppendEntries from the current leader resets the election
-        // timer — including one whose consistency check fails (R12).
+        // Any structurally valid AppendEntries in the current term confirms
+        // a leader and resets the election timer, even if its anchor fails.
         self.reset_election_deadline();
         // R20: this sender is the freshest leader sighting we have.
         self.leader_hint = Some(leader_id);
 
         // R12: the consistency check — do we hold the leader's anchor entry?
         // Failure still counted the sender as leader above; the reply carries
-        // my log length as a backoff hint for R18's next_index walk.
+        // my last log index so the leader can retry from the following index.
         if prev_log_index > 0
             && (self.last_log_index() < prev_log_index
                 || self.term_at(prev_log_index) != prev_log_term)
@@ -159,7 +182,6 @@ impl RaftNode {
         // in which entries are ever deleted, and only here, on a non-leader
         // (R15). Entries already present are skipped, never re-appended, so
         // a duplicate or reordered AppendEntries can never shrink the log.
-        let entries_len = entries.len() as u64;
         let mut truncate_from = None;
         let mut appended = Vec::new();
         for entry in entries {
@@ -190,13 +212,13 @@ impl RaftNode {
             msg: RaftMessage::AppendEntriesReply {
                 term: self.hard.current_term,
                 success: true,
-                match_index: prev_log_index + entries_len,
+                match_index: payload_last_index,
             },
         });
 
         // R14: lift commit_index toward the leader's, bounded by what this
         // RPC covered — never backwards — then apply in order (R4).
-        let new_commit = leader_commit.min(prev_log_index + entries_len);
+        let new_commit = leader_commit.min(payload_last_index);
         if new_commit > self.commit_index {
             self.commit_index = new_commit;
             self.apply_committed(effects);
@@ -205,8 +227,8 @@ impl RaftNode {
 
     /// R18: success raises this peer's watermark monotonically and probes
     /// commit advancement (R19); failure walks `next_index` back — hint-
-    /// accelerated, floored at 1, with plain decrement as the guaranteed-
-    /// terminating fallback. Retry rides the next heartbeat (R17).
+    /// accelerated, floored at 1, with plain decrement as the terminating
+    /// fallback. Retry rides the next heartbeat.
     pub(crate) fn on_append_entries_reply(
         &mut self,
         from: NodeId,
@@ -239,13 +261,13 @@ impl RaftNode {
                 // R18: monotone — a duplicate or reordered success can never
                 // move the watermark backwards.
                 *matched = (*matched).max(match_index);
-                *next = *matched + 1;
+                *next = matched.saturating_add(1);
                 // R19: the leader counts itself via its own log length.
                 let mut all: Vec<LogIndex> = peer_match.values().copied().collect();
                 all.push(own_last);
                 commit_advance(self.commit_index, self.hard.current_term, &self.log, &all)
             } else {
-                *next = 1.max((*next - 1).min(match_index + 1));
+                *next = 1.max(next.saturating_sub(1).min(match_index.saturating_add(1)));
                 None
             }
         };
@@ -258,9 +280,10 @@ impl RaftNode {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
+    use crate::Input;
 
     fn log(terms: &[Term]) -> Vec<Entry> {
         terms
@@ -272,6 +295,132 @@ mod tests {
                 command: Command::NoOp,
             })
             .collect()
+    }
+
+    fn append_entries(prev_log_index: LogIndex, indexes: &[LogIndex]) -> RaftMessage {
+        append_entries_with_terms(
+            9,
+            prev_log_index,
+            0,
+            &indexes.iter().map(|&index| (index, 9)).collect::<Vec<_>>(),
+        )
+    }
+
+    fn append_entries_with_terms(
+        message_term: Term,
+        prev_log_index: LogIndex,
+        prev_log_term: Term,
+        entries: &[(LogIndex, Term)],
+    ) -> RaftMessage {
+        RaftMessage::AppendEntries {
+            term: message_term,
+            leader_id: 2,
+            prev_log_index,
+            prev_log_term,
+            entries: entries
+                .iter()
+                .map(|&(index, term)| Entry {
+                    index,
+                    term,
+                    command: Command::NoOp,
+                })
+                .collect(),
+            leader_commit: LogIndex::MAX,
+        }
+    }
+
+    fn assert_malformed_append_is_side_effect_free(msg: RaftMessage) {
+        let mut node = RaftNode::new(1, vec![2, 3], 7);
+        node.hard.current_term = 3;
+        node.hard.voted_for = Some(1);
+        node.log = log(&[2]);
+        node.role = Role::Candidate {
+            votes_received: BTreeSet::from([1]),
+        };
+        node.election_deadline_ms = 123;
+        node.leader_hint = Some(3);
+
+        let hard_before = node.hard.clone();
+        let log_before = node.log.clone();
+        let role_before = node.role.clone();
+        let effects = node.step(Input::Message { from: 2, msg });
+
+        assert_eq!(node.hard, hard_before);
+        assert_eq!(node.log, log_before);
+        assert_eq!(node.role, role_before);
+        assert_eq!(node.commit_index, 0);
+        assert_eq!(node.last_applied, 0);
+        assert_eq!(node.election_deadline_ms, 123);
+        assert_eq!(node.leader_hint, Some(3));
+        assert_eq!(
+            effects,
+            vec![Effect::Send {
+                to: 2,
+                msg: RaftMessage::AppendEntriesReply {
+                    term: 3,
+                    success: false,
+                    match_index: 1,
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn malformed_append_indices_are_rejected_before_state_changes() {
+        assert_malformed_append_is_side_effect_free(append_entries(0, &[0]));
+        assert_malformed_append_is_side_effect_free(append_entries(0, &[1, 3]));
+        assert_malformed_append_is_side_effect_free(append_entries(
+            LogIndex::MAX,
+            &[LogIndex::MAX],
+        ));
+        assert_malformed_append_is_side_effect_free(append_entries(
+            LogIndex::MAX - 1,
+            &[LogIndex::MAX, 0],
+        ));
+    }
+
+    #[test]
+    fn malformed_append_terms_are_rejected_before_state_changes() {
+        assert_malformed_append_is_side_effect_free(append_entries_with_terms(9, 1, 5, &[(2, 4)]));
+        assert_malformed_append_is_side_effect_free(append_entries_with_terms(
+            9,
+            0,
+            0,
+            &[(1, 4), (2, 3)],
+        ));
+        assert_malformed_append_is_side_effect_free(append_entries_with_terms(9, 0, 0, &[(1, 10)]));
+        assert_malformed_append_is_side_effect_free(append_entries_with_terms(9, 1, 10, &[]));
+    }
+
+    #[test]
+    fn overflow_adjacent_valid_shapes_fail_consistency_without_panicking() {
+        for (prev_log_index, indexes) in [
+            (LogIndex::MAX, Vec::new()),
+            (LogIndex::MAX - 1, vec![LogIndex::MAX]),
+        ] {
+            let mut node = RaftNode::new(1, vec![2, 3], 7);
+            node.hard.current_term = 9;
+            node.log = log(&[2]);
+            let log_before = node.log.clone();
+
+            let effects = node.step(Input::Message {
+                from: 2,
+                msg: append_entries(prev_log_index, &indexes),
+            });
+
+            assert_eq!(node.log, log_before);
+            assert!(!effects.iter().any(|effect| matches!(
+                effect,
+                Effect::PersistHardState(_) | Effect::PersistLogEntries { .. } | Effect::Apply(_)
+            )));
+            assert!(effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Send {
+                    msg: RaftMessage::AppendEntriesReply { success: false, .. },
+                    ..
+                }
+            )));
+        }
     }
 
     /// R19b's load-bearing clause: a majority-replicated PRIOR-term entry

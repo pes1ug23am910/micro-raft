@@ -160,6 +160,9 @@ async fn peer_task(
     loop {
         match TcpStream::connect(addr).await {
             Ok(mut stream) => {
+                if let Err(e) = stream.set_nodelay(true) {
+                    warn!(peer, %addr, error = %e, "failed to enable TCP_NODELAY on outbound peer connection");
+                }
                 debug!(peer, %addr, "peer connection established");
                 loop {
                     match rx.recv().await {
@@ -213,6 +216,9 @@ pub async fn spawn_listener(
         loop {
             match listener.accept().await {
                 Ok((stream, remote)) => {
+                    if let Err(e) = stream.set_nodelay(true) {
+                        warn!(%remote, error = %e, "failed to enable TCP_NODELAY on accepted peer connection");
+                    }
                     tokio::spawn(conn_task(stream, remote, tx.clone()));
                 }
                 Err(e) => warn!(error = %e, "accept failed"),

@@ -225,15 +225,46 @@ impl RaftNode {
     }
 
     fn on_message(&mut self, from: NodeId, msg: RaftMessage, effects: &mut Vec<Effect>) {
+        // Reject malformed AppendEntries before adopting its term, resetting
+        // timers, or touching persistent/volatile state. The sender receives
+        // the same ordinary failure shape used for a consistency mismatch.
+        let append_last_index = match &msg {
+            RaftMessage::AppendEntries {
+                term,
+                leader_id,
+                prev_log_index,
+                prev_log_term,
+                entries,
+                ..
+            } => match replication::validate_append_entries(
+                *term,
+                *prev_log_index,
+                *prev_log_term,
+                entries,
+            ) {
+                Some(last_index) => Some(last_index),
+                None => {
+                    effects.push(Effect::Send {
+                        to: *leader_id,
+                        msg: RaftMessage::AppendEntriesReply {
+                            term: self.hard.current_term,
+                            success: false,
+                            match_index: self.last_log_index(),
+                        },
+                    });
+                    return;
+                }
+            },
+            _ => None,
+        };
         let msg_term = match &msg {
             RaftMessage::RequestVote { term, .. }
             | RaftMessage::RequestVoteReply { term, .. }
             | RaftMessage::AppendEntries { term, .. }
             | RaftMessage::AppendEntriesReply { term, .. } => *term,
         };
-        // R2: any message (request OR reply) with a newer term — adopt it,
-        // clear the vote, convert to Follower, persist — all BEFORE the
-        // message content is processed.
+        // R2: any structurally valid message (request OR reply) with a newer
+        // term is adopted before its semantic content is processed.
         if msg_term > self.hard.current_term {
             self.hard.current_term = msg_term;
             self.hard.voted_for = None;
@@ -266,15 +297,21 @@ impl RaftNode {
                 prev_log_term,
                 entries,
                 leader_commit,
-            } => self.on_append_entries(
-                term,
-                leader_id,
-                prev_log_index,
-                prev_log_term,
-                entries,
-                leader_commit,
-                effects,
-            ),
+            } => {
+                let Some(payload_last_index) = append_last_index else {
+                    return;
+                };
+                self.on_append_entries(
+                    term,
+                    leader_id,
+                    prev_log_index,
+                    prev_log_term,
+                    entries,
+                    payload_last_index,
+                    leader_commit,
+                    effects,
+                );
+            }
             RaftMessage::AppendEntriesReply {
                 term,
                 success,

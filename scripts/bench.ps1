@@ -17,10 +17,19 @@ $script:Processes = @{}
 $script:Jobs = @()
 $script:OwnsCluster = $false
 $script:TranscriptStarted = $false
-$script:GitSafeDirectory = "safe.directory=$script:RepoRoot"
-$script:GitExcludeFile = Join-Path $script:RepoRoot ".git\info\exclude"
-$script:SourceRevision = (& git -c $script:GitSafeDirectory -c "core.excludesFile=$script:GitExcludeFile" -C $script:RepoRoot rev-parse --verify HEAD | Select-Object -First 1)
-$script:SourceDirty = [bool](& git -c $script:GitSafeDirectory -c "core.excludesFile=$script:GitExcludeFile" -C $script:RepoRoot status --porcelain --untracked-files=no)
+# Git metadata is best effort; never bypass Git's repository-ownership checks.
+$script:SourceRevision = $null
+$script:SourceDirty = $null
+if ($null -ne (Get-Command git -ErrorAction SilentlyContinue)) {
+    $revision = @(& git -C $script:RepoRoot rev-parse --verify HEAD 2>$null)
+    if (($LASTEXITCODE -eq 0) -and ($revision.Count -gt 0)) {
+        $script:SourceRevision = [string]$revision[0]
+        $status = @(& git -C $script:RepoRoot status --porcelain --untracked-files=no 2>$null)
+        if ($LASTEXITCODE -eq 0) {
+            $script:SourceDirty = [bool]$status
+        }
+    }
+}
 $script:RustcVersion = (& rustc --version 2>$null | Select-Object -First 1)
 $script:CargoVersion = (& cargo --version 2>$null | Select-Object -First 1)
 $script:CargoLockSha256 = (Get-FileHash -LiteralPath (Join-Path $script:RepoRoot "Cargo.lock") -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -402,7 +411,7 @@ try {
 
     $summaryDocument = [ordered]@{
         generated_utc = [DateTime]::UtcNow.ToString("o")
-        source_revision = [string]$script:SourceRevision
+        source_revision = $script:SourceRevision
         source_worktree_dirty = $script:SourceDirty
         rustc = [string]$script:RustcVersion
         cargo = [string]$script:CargoVersion

@@ -121,8 +121,8 @@ pub struct Sim {
     rng: Pcg32,
     pub faults: FaultConfig,
     invariants: Invariants,
-    /// Every entry ever committed by a leader in its own term — the
-    /// ground truth LeaderCompleteness/CommittedDurability checks against.
+    /// Every entry covered when a leader advances `commit_index` under the
+    /// current-term rule — the ground truth for durability checks.
     committed: CommittedRegistry,
     persistence_mode: PersistenceMode,
     stats: FaultStats,
@@ -475,22 +475,6 @@ impl Sim {
                 "seed={}: n{id} emitted Apply history disagrees with last_applied",
                 self.seed
             );
-            if node.applied.len() == node.observed_applied_len && applied_changed {
-                for (offset, (index, command)) in node.applied.iter().enumerate() {
-                    let expected = offset as LogIndex + 1;
-                    assert_eq!(
-                        *index, expected,
-                        "seed={}: n{id} applied history skipped or duplicated an index",
-                        self.seed
-                    );
-                    assert_eq!(
-                        node.core.log[offset].command, *command,
-                        "seed={}: n{id} applied command differs from its log at index {expected}",
-                        self.seed
-                    );
-                }
-            }
-
             if node.core.is_leader() && node.core.commit_index > node.registered_commit {
                 for index in (node.registered_commit + 1)..=node.core.commit_index {
                     newly_committed.push(
@@ -505,6 +489,32 @@ impl Sim {
         let commitment_changed = !newly_committed.is_empty();
         for entry in newly_committed {
             self.committed.record(self.seed, &entry);
+        }
+
+        if applied_changed {
+            // Validate every live history after the first pass has discovered
+            // all changes. This includes nodes ordered before the node whose
+            // Apply effect triggered the cluster-wide check.
+            for (&id, node) in &self.nodes {
+                if !node.alive {
+                    continue;
+                }
+                for (offset, (index, command)) in node.applied.iter().enumerate() {
+                    let expected = offset as LogIndex + 1;
+                    assert_eq!(
+                        *index, expected,
+                        "seed={}: n{id} applied history skipped or duplicated an index",
+                        self.seed
+                    );
+                    assert_eq!(
+                        node.core.log[offset].command, *command,
+                        "seed={}: n{id} applied command differs from its log at index {expected}",
+                        self.seed
+                    );
+                    self.committed
+                        .assert_applied(self.seed, id, *index, command);
+                }
+            }
         }
 
         if self.persistence_mode == PersistenceMode::Durable {
@@ -700,7 +710,7 @@ impl Sim {
     }
 
     /// Crash a node: volatile consensus/application state disappears, while
-    /// its virtual disk and historical invariant evidence remain intact.
+    /// its virtual disk and global safety registries remain intact.
     pub fn crash(&mut self, id: NodeId) -> bool {
         let node = self.nodes.get_mut(&id).expect("known node id");
         if !node.alive {
@@ -808,8 +818,7 @@ impl Sim {
         &self.nodes.get(&id).expect("known node id").applied
     }
 
-    /// The committed-entry registry — every entry a leader ever
-    /// committed in its own term.
+    /// Every entry covered by a leader's `commit_index` advancement.
     pub fn registry(&self) -> &CommittedRegistry {
         &self.committed
     }
@@ -872,5 +881,66 @@ mod tests {
 
         assert_eq!(sim.durable_hard_state(2).current_term, 0);
         assert!(sim.stats().messages_dropped_to_crashed_nodes >= 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "n1 applied command differs from its log")]
+    fn applied_change_rechecks_nodes_ordered_before_the_changed_node() {
+        let mut sim = Sim::new(3, 31);
+        let first = Entry {
+            index: 1,
+            term: 1,
+            command: Command::NoOp,
+        };
+        for id in 1..=3 {
+            let node = sim.nodes.get_mut(&id).expect("known node");
+            node.core.hard.current_term = 1;
+            node.disk_hard.current_term = 1;
+            node.core.log = vec![first.clone()];
+            node.disk_log = vec![first.clone()];
+            node.core.commit_index = 1;
+            node.core.last_applied = 1;
+            node.applied = vec![(1, Command::NoOp)];
+        }
+        sim.committed.record(31, &first);
+        sim.check_all_invariants();
+
+        sim.nodes.get_mut(&1).expect("known node").applied[0].1 =
+            Command::Delete { key: "bad".into() };
+
+        let second = Entry {
+            index: 2,
+            term: 1,
+            command: Command::NoOp,
+        };
+        let node = sim.nodes.get_mut(&2).expect("known node");
+        node.core.log.push(second.clone());
+        node.disk_log.push(second);
+        node.core.commit_index = 2;
+        node.core.last_applied = 2;
+        node.applied.push((2, Command::NoOp));
+
+        sim.check_all_invariants();
+    }
+
+    #[test]
+    #[should_panic(expected = "applied unregistered index 1")]
+    fn applied_entry_must_exist_in_committed_registry() {
+        let mut sim = Sim::new(3, 37);
+        let entry = Entry {
+            index: 1,
+            term: 1,
+            command: Command::NoOp,
+        };
+        let node = sim.nodes.get_mut(&1).expect("known node");
+        node.core.hard.current_term = 1;
+        node.disk_hard.current_term = 1;
+        node.core.log = vec![entry.clone()];
+        node.disk_log = vec![entry];
+        node.core.commit_index = 1;
+        node.core.last_applied = 1;
+        node.applied = vec![(1, Command::NoOp)];
+
+        sim.check_all_invariants();
     }
 }

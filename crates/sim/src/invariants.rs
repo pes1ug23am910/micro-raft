@@ -105,11 +105,11 @@ pub fn check_applied_agreement(
     );
 }
 
-/// The committed-entry registry: an entry is recorded the moment its
-/// index becomes `<= commit_index` on a leader committing in its own term
-/// (R19 — the only place commitment is ever DEFINED; followers merely learn
-/// of it). LeaderCompleteness/CommittedDurability v1 then demands every
-/// registered entry exist in the log of every subsequent leader.
+/// The committed-entry registry records every newly covered prefix entry when
+/// a leader advances `commit_index` under the current-term rule. Followers
+/// only learn that decision. LeaderCompleteness and CommittedDurability then
+/// require every registered entry in each later leader and on a durable
+/// majority.
 #[derive(Debug, Default)]
 pub struct CommittedRegistry {
     entries: BTreeMap<LogIndex, Entry>,
@@ -131,7 +131,7 @@ impl CommittedRegistry {
         }
     }
 
-    /// LeaderCompleteness/CommittedDurability v1: asserted the moment any
+    /// LeaderCompleteness/CommittedDurability: asserted the moment any
     /// node becomes Leader — every entry ever committed must already be in
     /// its log, byte-identical.
     pub fn assert_all_in_leader_log(&self, seed: u64, leader: NodeId, term: Term, log: &[Entry]) {
@@ -145,6 +145,21 @@ impl CommittedRegistry {
                  {term} without committed entry {entry:?} (index {index})"
             );
         }
+    }
+
+    /// Every applied command must already be covered by a leader commitment.
+    /// Pairwise applied-history agreement alone cannot detect all nodes
+    /// consistently applying the same uncommitted entry.
+    pub fn assert_applied(&self, seed: u64, node: NodeId, index: LogIndex, command: &Command) {
+        let committed = self.entries.get(&index).unwrap_or_else(|| {
+            panic!(
+                "seed={seed}: StateMachineSafety violated — n{node} applied unregistered index {index}"
+            )
+        });
+        assert_eq!(
+            &committed.command, command,
+            "seed={seed}: StateMachineSafety violated — n{node} applied a command that differs from the committed entry at index {index}"
+        );
     }
 
     pub fn get(&self, index: LogIndex) -> Option<&Entry> {

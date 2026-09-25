@@ -1,7 +1,3 @@
 /target/
 /data/
-
-# Local-only material excluded from the public repository and release archives.
 /.local/
-/Evidence/
-/interview_prep/

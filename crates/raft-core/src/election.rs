@@ -49,9 +49,9 @@ impl RaftNode {
         let mut votes_received = BTreeSet::new();
         votes_received.insert(self.id);
         self.role = Role::Candidate { votes_received };
-        self.reset_election_deadline(); // R6c
-                                        // The persist precedes the RequestVote sends. Otherwise a candidate
-                                        // could forget its self-vote after a crash and vote twice in one term.
+        self.reset_election_deadline();
+        // Persist before soliciting votes. Otherwise a crash could erase the
+        // candidate's self-vote and allow it to vote twice in one term.
         effects.push(Effect::PersistHardState(self.hard.clone()));
         effects.push(Effect::RoleChanged {
             role_name: "Candidate",
