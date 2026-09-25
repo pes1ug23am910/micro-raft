@@ -96,7 +96,7 @@ commits another value, restarts the old leader with its existing disk, and
 waits for it to catch up. Node logs and the transcript stay under ignored
 `.local/demo/` directories.
 
-The latest verification run detected a replacement leader **0.264 seconds**
+The latest verification run detected a replacement leader **0.275 seconds**
 after the old leader exited and passed the old-leader restart/catch-up sequence.
 
 ## Verification
@@ -159,16 +159,16 @@ or a checkout rejected by Git's ownership checks.
 
 Measured on Windows x64 build 26200 with Rust 1.96.0 and the release profile.
 This was a single-machine loopback run on 2026-09-25 from clean source revision
-`32ed26c`, using unique keys and small `value-<sequence>` text payloads. All
+`c00c83c`, using unique keys and small `value-<sequence>` text payloads. All
 four trials shared one freshly started cluster; the figures characterize this
 local demonstration, not a distributed-network deployment.
 
 | Trial | Clients | Writes/s | p50 | p99 | Successful writes | Failures |
 |---|---:|---:|---:|---:|---:|---:|
-| Sequential 1 | 1 | 16.13 | 61.075 ms | 65.052 ms | 484 | 0 |
-| Sequential 2 | 1 | 16.14 | 61.318 ms | 63.457 ms | 485 | 0 |
-| Concurrent 1 | 8 | 128.85 | 61.296 ms | 64.681 ms | 3,872 | 0 |
-| Concurrent 2 | 8 | 128.84 | 61.447 ms | 64.970 ms | 3,869 | 0 |
+| Sequential 1 | 1 | 16.10 | 61.287 ms | 65.988 ms | 484 | 0 |
+| Sequential 2 | 1 | 16.20 | 61.240 ms | 65.646 ms | 486 | 0 |
+| Concurrent 1 | 8 | 128.94 | 61.364 ms | 66.822 ms | 3,872 | 0 |
+| Concurrent 2 | 8 | 128.75 | 61.381 ms | 67.696 ms | 3,864 | 0 |
 
 Replication intentionally rides the 50 ms heartbeat cadence. A single client
 therefore waits roughly one heartbeat per write, while multiple outstanding
