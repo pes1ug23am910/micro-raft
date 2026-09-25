@@ -21,13 +21,23 @@ $script:TranscriptStarted = $false
 $script:SourceRevision = $null
 $script:SourceDirty = $null
 if ($null -ne (Get-Command git -ErrorAction SilentlyContinue)) {
-    $revision = @(& git -C $script:RepoRoot rev-parse --verify HEAD 2>$null)
-    if (($LASTEXITCODE -eq 0) -and ($revision.Count -gt 0)) {
-        $script:SourceRevision = [string]$revision[0]
-        $status = @(& git -C $script:RepoRoot status --porcelain --untracked-files=no 2>$null)
-        if ($LASTEXITCODE -eq 0) {
-            $script:SourceDirty = [bool]$status
+    # Windows PowerShell surfaces a native program's stderr as ErrorRecord
+    # objects. Git metadata is optional, so warnings such as an unreadable
+    # global excludes file must not abort the benchmark under Stop semantics.
+    $savedErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $revision = @(& git -C $script:RepoRoot rev-parse --verify HEAD 2>$null)
+        if (($LASTEXITCODE -eq 0) -and ($revision.Count -gt 0)) {
+            $script:SourceRevision = [string]$revision[0]
+            $status = @(& git -C $script:RepoRoot status --porcelain --untracked-files=no 2>$null)
+            if ($LASTEXITCODE -eq 0) {
+                $script:SourceDirty = [bool]$status
+            }
         }
+    }
+    finally {
+        $ErrorActionPreference = $savedErrorActionPreference
     }
 }
 $script:RustcVersion = (& rustc --version 2>$null | Select-Object -First 1)
