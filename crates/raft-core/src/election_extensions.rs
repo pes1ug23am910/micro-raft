@@ -47,6 +47,7 @@ fn contact(node: &mut RaftNode, from: NodeId, round: u64, success: bool, index: 
     node.step(Input::Message {
         from,
         msg: RaftMessage::AppendEntriesReply {
+            conflict: None,
             term: node.hard.current_term,
             success,
             match_index: index,

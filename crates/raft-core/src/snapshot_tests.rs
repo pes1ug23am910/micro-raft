@@ -676,6 +676,7 @@ fn compacted_suffix_commit_and_application_use_absolute_indices() {
     let effects = node.step(Input::Message {
         from: 2,
         msg: RaftMessage::AppendEntriesReply {
+            conflict: None,
             term: 5,
             success: true,
             match_index: 4,

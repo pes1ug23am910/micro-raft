@@ -374,8 +374,10 @@ historical measurements rather than results for the current implementation.
   These mechanisms do not establish
   a read lease or promise a wall-clock election bound. All members must use
   the same upgraded wire protocol; mixed-version operation is unsupported.
-- Conflict repair decrements `next_index` using the follower's last-index hint;
-  it does not implement the optional conflict-term fast-backtracking extension.
+- Conflict repair uses correlated term/first-index hints to skip divergent
+  term runs, with last-index fallback for replies without the optional hint.
+  Rejections cannot undo confirmed replication progress. See
+  [conflict-term backtracking](docs/conflict-backtracking.md).
 - Snapshot publication compacts a committed applied prefix. Retained log
   entries and the complete application cache remain in memory. Oversized snapshots
   are refused while the WAL is retained, so the snapshot threshold is not

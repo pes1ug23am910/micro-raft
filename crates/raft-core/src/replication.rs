@@ -2,7 +2,7 @@
 //! follower commit updates, leader progress tracking, client proposals, and
 //! the current-term rule for advancing `commit_index`.
 
-use crate::message::{Effect, RaftMessage};
+use crate::message::{AppendConflictHint, Effect, RaftMessage};
 use crate::types::{Command, Entry, LogIndex, NodeId, Role, Term};
 use crate::{RaftNode, MAX_APPEND_ENTRIES};
 
@@ -182,6 +182,7 @@ impl RaftNode {
             effects.push(Effect::Send {
                 to: leader_id,
                 msg: RaftMessage::AppendEntriesReply {
+                    conflict: None,
                     term: self.hard.current_term,
                     success: false,
                     match_index: self.last_log_index(),
@@ -214,9 +215,10 @@ impl RaftNode {
         }
 
         // R12: the consistency check — do we hold the leader's anchor entry?
-        // Failure still counted the sender as leader above; the reply carries
-        // my last log index so the leader can retry from the following index.
+        // The last-index fallback remains available to older decoders. The
+        // optional hint skips an entire conflicting term in upgraded leaders.
         if self.log_term(prev_log_index) != Some(prev_log_term) {
+            let conflict = self.append_conflict_hint(prev_log_index);
             effects.push(Effect::Send {
                 to: leader_id,
                 msg: RaftMessage::AppendEntriesReply {
@@ -224,6 +226,7 @@ impl RaftNode {
                     success: false,
                     match_index: self.last_log_index(),
                     contact_round,
+                    conflict,
                 },
             });
             return;
@@ -236,6 +239,7 @@ impl RaftNode {
             effects.push(Effect::Send {
                 to: leader_id,
                 msg: RaftMessage::AppendEntriesReply {
+                    conflict: None,
                     term: self.hard.current_term,
                     success: false,
                     match_index: self.last_log_index(),
@@ -261,6 +265,7 @@ impl RaftNode {
             effects.push(Effect::Send {
                 to: leader_id,
                 msg: RaftMessage::AppendEntriesReply {
+                    conflict: None,
                     term: self.hard.current_term,
                     success: false,
                     match_index: self.last_log_index(),
@@ -311,6 +316,7 @@ impl RaftNode {
         effects.push(Effect::Send {
             to: leader_id,
             msg: RaftMessage::AppendEntriesReply {
+                conflict: None,
                 term: self.hard.current_term,
                 success: true,
                 match_index: payload_last_index,
@@ -319,10 +325,39 @@ impl RaftNode {
         });
     }
 
-    /// R18: success raises this peer's watermark monotonically and probes
-    /// commit advancement (R19); failure walks `next_index` back — hint-
-    /// accelerated, floored at 1, with plain decrement as the terminating
-    /// fallback. Retry rides the next heartbeat.
+    /// First *available* index of the conflicting term. Terms are monotonic,
+    /// so binary search avoids scanning a long same-term suffix per rejection.
+    /// A snapshot retains its boundary term but cannot reveal compacted entries.
+    fn append_conflict_hint(&self, rejected_index: LogIndex) -> Option<AppendConflictHint> {
+        let term = self.log_term(rejected_index);
+        let first_index = match term {
+            Some(0) => return None, // index-zero framing error, not a real term
+            Some(term) if self.snapshot_term() == term => self.snapshot_index(),
+            Some(term) => self.log[self.log.partition_point(|entry| entry.term < term)].index,
+            None => self.last_log_index().checked_add(1)?,
+        };
+        Some(AppendConflictHint {
+            rejected_index,
+            term,
+            first_index,
+        })
+    }
+
+    fn last_index_in_term(&self, term: Term) -> Option<LogIndex> {
+        let end = self.log.partition_point(|entry| entry.term <= term);
+        if let Some(entry) = end.checked_sub(1).and_then(|i| self.log.get(i)) {
+            if entry.term == term {
+                return Some(entry.index);
+            }
+        }
+        (self.snapshot_term() == term).then_some(self.snapshot_index())
+    }
+
+    /// R18: successes raise replication watermarks; rejection hints only move
+    /// the retry cursor backwards, never below confirmed replication. A term
+    /// found locally skips to its end; an absent term skips to the follower's
+    /// first available index for it. Retry rides the next heartbeat.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn on_append_entries_reply(
         &mut self,
         from: NodeId,
@@ -330,6 +365,7 @@ impl RaftNode {
         success: bool,
         match_index: LogIndex,
         contact_round: u64,
+        conflict: Option<AppendConflictHint>,
         effects: &mut Vec<Effect>,
     ) {
         // R3: stale replies — an older term, or arriving in a role that no
@@ -342,6 +378,30 @@ impl RaftNode {
         if success && match_index > own_last {
             return;
         }
+        let hinted_next = if let Some(hint) = conflict {
+            let valid = !success
+                && hint.first_index > 0
+                && hint.first_index <= hint.rejected_index
+                && match hint.term {
+                    Some(conflict_term) => {
+                        conflict_term > 0
+                            && conflict_term <= term
+                            && hint.rejected_index <= match_index
+                            && self.log_term(hint.rejected_index) != Some(conflict_term)
+                    }
+                    None => match_index.checked_add(1) == Some(hint.first_index),
+                };
+            if !valid {
+                return; // Malformed hints cannot count as fresh quorum contact.
+            }
+            Some(
+                hint.term
+                    .and_then(|term| self.last_index_in_term(term))
+                    .map_or(hint.first_index, |index| index.saturating_add(1)),
+            )
+        } else {
+            None
+        };
         let successful = {
             let Role::Leader {
                 next_index,
@@ -355,6 +415,11 @@ impl RaftNode {
             else {
                 return; // not a peer of this cluster
             };
+            if conflict.is_some_and(|hint| {
+                hint.rejected_index != next.saturating_sub(1) || hint.rejected_index <= *matched
+            }) {
+                return; // A newer reply already changed this request's cursor.
+            }
             // A consistency rejection still proves the peer heard this round.
             // Old-round replication information remains useful, but cannot renew
             // leadership. The exact round is term-scoped and never reused.
@@ -368,7 +433,9 @@ impl RaftNode {
                 *next = matched.saturating_add(1);
                 true
             } else {
-                *next = 1.max(next.saturating_sub(1).min(match_index.saturating_add(1)));
+                let floor = matched.saturating_add(1).max(1);
+                let candidate = hinted_next.unwrap_or_else(|| match_index.saturating_add(1));
+                *next = candidate.min(next.saturating_sub(1)).max(floor);
                 false
             }
         };
@@ -460,6 +527,7 @@ mod tests {
             vec![Effect::Send {
                 to: 2,
                 msg: RaftMessage::AppendEntriesReply {
+                    conflict: None,
                     contact_round: 0,
                     term: 3,
                     success: false,
@@ -606,7 +674,7 @@ mod tests {
             matched += u64::try_from(entries.len()).expect("batch length fits");
 
             let mut reply_effects = Vec::new();
-            node.on_append_entries_reply(2, 4, true, matched, 0, &mut reply_effects);
+            node.on_append_entries_reply(2, 4, true, matched, 0, None, &mut reply_effects);
         }
 
         assert_eq!(batch_sizes, vec![MAX_APPEND_ENTRIES, MAX_APPEND_ENTRIES, 5]);

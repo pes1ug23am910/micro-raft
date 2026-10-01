@@ -91,7 +91,7 @@ fn leader() -> RaftNode {
         .unwrap();
     node.start_election(&mut Vec::new());
     node.on_request_vote_reply(2, 1, true, &mut Vec::new());
-    node.on_append_entries_reply(2, 1, true, 1, node.contact_round, &mut Vec::new());
+    node.on_append_entries_reply(2, 1, true, 1, node.contact_round, None, &mut Vec::new());
     assert_eq!(node.commit_index, 1);
     node
 }
@@ -292,7 +292,15 @@ fn uncommitted_final_restores_new_effective_quorum_and_conflict_rollback_restore
 fn promotion_requires_both_quorums_for_joint_and_new_quorum_for_final() {
     let mut node = leader();
     let add_index = accepted(&admin(&mut node, "add-4", add(4)));
-    node.on_append_entries_reply(2, 1, true, add_index, node.contact_round, &mut Vec::new());
+    node.on_append_entries_reply(
+        2,
+        1,
+        true,
+        add_index,
+        node.contact_round,
+        None,
+        &mut Vec::new(),
+    );
     assert!(node.effective_membership.learners.contains(&4));
     let op = AdminOperation::SetVoters {
         voters: vec![2, 3, 4],
@@ -302,24 +310,32 @@ fn promotion_requires_both_quorums_for_joint_and_new_quorum_for_final() {
         outcome:MembershipOutcome::Rejected { reason,.. },..
     }) if reason=="learner_not_caught_up")
     );
-    node.on_append_entries_reply(4, 1, true, add_index, node.contact_round, &mut Vec::new());
+    node.on_append_entries_reply(
+        4,
+        1,
+        true,
+        add_index,
+        node.contact_round,
+        None,
+        &mut Vec::new(),
+    );
     let joint = accepted(&admin(&mut node, "swap", op.clone()));
     assert!(matches!(node.voter_config(), VoterConfig::Joint { .. }));
     let round = node.contact_round;
-    node.on_append_entries_reply(2, 1, true, joint, round, &mut Vec::new());
+    node.on_append_entries_reply(2, 1, true, joint, round, None, &mut Vec::new());
     assert_eq!(
         node.commit_index, add_index,
         "old-only quorum cannot commit joint"
     );
-    node.on_append_entries_reply(4, 1, true, joint, round, &mut Vec::new());
+    node.on_append_entries_reply(4, 1, true, joint, round, None, &mut Vec::new());
     assert_eq!(node.commit_index, joint);
     let mut effects = Vec::new();
     node.maybe_finalize_membership(&mut effects);
     let final_index = node.last_log_index();
     assert_eq!(final_index, joint + 1);
-    node.on_append_entries_reply(2, 1, true, final_index, round, &mut Vec::new());
+    node.on_append_entries_reply(2, 1, true, final_index, round, None, &mut Vec::new());
     assert_eq!(node.commit_index, joint, "old-only is not a new majority");
-    node.on_append_entries_reply(4, 1, true, final_index, round, &mut effects);
+    node.on_append_entries_reply(4, 1, true, final_index, round, None, &mut effects);
     assert_eq!(node.commit_index, final_index);
     assert_eq!(
         node.role,
@@ -337,8 +353,8 @@ fn promotion_requires_both_quorums_for_joint_and_new_quorum_for_final() {
 fn joint_read_requires_both_quorums_and_configuration_change_cancels_old_context() {
     let mut node = leader();
     let index = accepted(&admin(&mut node, "add-4", add(4)));
-    node.on_append_entries_reply(2, 1, true, index, node.contact_round, &mut Vec::new());
-    node.on_append_entries_reply(4, 1, true, index, node.contact_round, &mut Vec::new());
+    node.on_append_entries_reply(2, 1, true, index, node.contact_round, None, &mut Vec::new());
+    node.on_append_entries_reply(4, 1, true, index, node.contact_round, None, &mut Vec::new());
     node.step(Input::ReadIndex { request_id: 7 });
     let effects = admin(
         &mut node,
@@ -471,7 +487,7 @@ fn exact_committed_admin_retry_is_cached_and_changed_payload_rejected() {
     let before = node.log.clone();
     assert_eq!(accepted(&admin(&mut node, "add-4", add(4))), index);
     assert_eq!(node.log, before);
-    node.on_append_entries_reply(2, 1, true, index, node.contact_round, &mut Vec::new());
+    node.on_append_entries_reply(2, 1, true, index, node.contact_round, None, &mut Vec::new());
     let record = node.committed_membership().state.records["add-4"].clone();
     assert!(
         matches!(admin(&mut node,"add-4",add(4)).as_slice(),[Effect::MembershipResult {
@@ -490,11 +506,19 @@ fn five_actor_joint() -> (RaftNode, u64) {
     let mut node = leader();
     for id in [4, 5] {
         let index = accepted(&admin(&mut node, &format!("add-{id}"), add(id)));
-        node.on_append_entries_reply(2, 1, true, index, node.contact_round, &mut Vec::new());
+        node.on_append_entries_reply(2, 1, true, index, node.contact_round, None, &mut Vec::new());
     }
     let fence = node.last_log_index();
     for id in [4, 5] {
-        node.on_append_entries_reply(id, 1, true, fence, node.contact_round, &mut Vec::new());
+        node.on_append_entries_reply(
+            id,
+            1,
+            true,
+            fence,
+            node.contact_round,
+            None,
+            &mut Vec::new(),
+        );
     }
     let joint = accepted(&admin(
         &mut node,
@@ -512,7 +536,15 @@ fn executed_union_quorum_commit_mutant_is_reached_and_rejected_by_independent_wi
         let (mut node, joint) = five_actor_joint();
         node.membership_union_fault = faulty;
         for id in [2, 4] {
-            node.on_append_entries_reply(id, 1, true, joint, node.contact_round, &mut Vec::new());
+            node.on_append_entries_reply(
+                id,
+                1,
+                true,
+                joint,
+                node.contact_round,
+                None,
+                &mut Vec::new(),
+            );
         }
         // This witness is deliberately a separate count over observed durable
         // reply identities; it never calls production quorum/replay helpers.
@@ -669,7 +701,7 @@ fn learner_vote_requires_group_bound_promoting_history_and_fresh_candidate_log()
 fn promotion_fence_does_not_move_with_later_writes_and_old_contacts_do_not_qualify() {
     let mut node = leader();
     let added = accepted(&admin(&mut node, "add-4", add(4)));
-    node.on_append_entries_reply(2, 1, true, added, node.contact_round, &mut Vec::new());
+    node.on_append_entries_reply(2, 1, true, added, node.contact_round, None, &mut Vec::new());
     let op = AdminOperation::SetVoters {
         voters: vec![1, 2, 3, 4],
     };
@@ -679,9 +711,9 @@ fn promotion_fence_does_not_move_with_later_writes_and_old_contacts_do_not_quali
         command: Command::NoOp,
     });
     assert!(node.last_log_index() > fence);
-    node.on_append_entries_reply(4, 1, true, fence, 0, &mut Vec::new());
+    node.on_append_entries_reply(4, 1, true, fence, 0, None, &mut Vec::new());
     assert!(accepted_or_none(&admin(&mut node, "promote", op.clone())).is_none());
-    node.on_append_entries_reply(4, 1, true, fence, node.contact_round, &mut Vec::new());
+    node.on_append_entries_reply(4, 1, true, fence, node.contact_round, None, &mut Vec::new());
     assert!(accepted_or_none(&admin(&mut node, "promote", op)).is_some());
 }
 fn accepted_or_none(effects: &[Effect]) -> Option<u64> {
@@ -706,7 +738,7 @@ fn advertisement_retry_is_rate_bounded_and_stops_after_peer_has_configuration() 
     node.now_ms = CHECK_QUORUM_MS;
     node.advertise_replication_membership(2, &mut effects);
     assert_eq!(effects.len(), 2);
-    node.on_append_entries_reply(2, 1, true, index, node.contact_round, &mut Vec::new());
+    node.on_append_entries_reply(2, 1, true, index, node.contact_round, None, &mut Vec::new());
     node.now_ms += CHECK_QUORUM_MS;
     node.advertise_replication_membership(2, &mut effects);
     assert_eq!(effects.len(), 2);

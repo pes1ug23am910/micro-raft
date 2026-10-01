@@ -207,6 +207,7 @@ mod tests {
                     true,
                     1,
                     1,
+                    None,
                     &mut Vec::new(),
                 );
             }
@@ -259,7 +260,7 @@ mod tests {
                 ..
             }]
         ));
-        node.on_append_entries_reply(2, 1, true, 1, 1, &mut Vec::new());
+        node.on_append_entries_reply(2, 1, true, 1, 1, None, &mut Vec::new());
         let admitted = node.step(Input::ReadIndex { request_id: 8 });
         assert!(admitted.iter().all(|e| matches!(
             e,
@@ -467,7 +468,7 @@ mod tests {
                 value: "v".into(),
             },
         });
-        node.on_append_entries_reply(2, 1, true, 2, 1, &mut Vec::new());
+        node.on_append_entries_reply(2, 1, true, 2, 1, None, &mut Vec::new());
         assert_eq!(node.commit_index, 2);
         assert!(matches!(
             reply(&mut node, 2, 1, c, true).as_slice(),
@@ -680,7 +681,7 @@ mod tests {
         assert!(node.pending_reads.is_empty());
         node.start_election(&mut Vec::new());
         node.on_request_vote_reply(2, 3, true, &mut Vec::new());
-        node.on_append_entries_reply(2, 3, true, 2, 1, &mut Vec::new());
+        node.on_append_entries_reply(2, 3, true, 2, 1, None, &mut Vec::new());
         assert_eq!(node.commit_index, 2);
         let new_context = context(&node.step(Input::ReadIndex { request_id: 2 }));
         assert_eq!(old_context, new_context, "wire identity is (term, context)");

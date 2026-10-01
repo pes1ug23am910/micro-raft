@@ -13,6 +13,19 @@ use crate::types::{
     SnapshotStageResult, SnapshotTransferId, Term,
 };
 
+/// Optional acceleration for a rejected AppendEntries consistency check.
+/// This is a retry hint, never evidence that an entry has been replicated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppendConflictHint {
+    /// The request's prev_log_index, used to discard obsolete rejections.
+    pub rejected_index: LogIndex,
+    /// Term at that index, or None when the follower is too short.
+    pub term: Option<Term>,
+    /// First available index of that term (possibly the snapshot boundary),
+    /// or the follower's last index plus one when the anchor is absent.
+    pub first_index: LogIndex,
+}
+
 /// The Raft wire protocol.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum RaftMessage {
@@ -53,11 +66,13 @@ pub enum RaftMessage {
         term: Term,
         success: bool,
         /// On success: index of the last entry the follower now matches.
-        /// On failure: the follower's last log index. The leader retries from
-        /// the following index, while still backing off at least one position.
+        /// On failure: the follower's last log index, retained for fallback
+        /// when the optional conflict-term hint is absent.
         match_index: LogIndex,
         #[serde(default)]
         contact_round: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        conflict: Option<AppendConflictHint>,
     },
     PreVote {
         prospective_term: Term,

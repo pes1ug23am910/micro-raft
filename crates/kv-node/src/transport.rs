@@ -1215,6 +1215,7 @@ mod tests {
                 contact_round: 0,
             },
             RaftMessage::AppendEntriesReply {
+                conflict: None,
                 term: 4,
                 success: false,
                 match_index: 5,
@@ -1277,6 +1278,44 @@ mod tests {
             }
         }
         assert_eq!(got, msgs, "1-byte chunking decodes every frame correctly");
+    }
+
+    #[test]
+    fn conflict_hints_roundtrip_on_legacy_and_scoped_transports() {
+        for hint in [
+            raft_core::AppendConflictHint {
+                rejected_index: 4,
+                term: Some(2),
+                first_index: 3,
+            },
+            raft_core::AppendConflictHint {
+                rejected_index: 8,
+                term: None,
+                first_index: 6,
+            },
+        ] {
+            let message = RaftMessage::AppendEntriesReply {
+                term: 4,
+                success: false,
+                match_index: 5,
+                contact_round: 7,
+                conflict: Some(hint),
+            };
+            let scope = test_scope("backtracking");
+            for (frame, mut decoder) in [
+                (encode_frame(2, &message).unwrap(), FrameDecoder::default()),
+                (
+                    encode_scoped_frame(2, &message, &scope).unwrap(),
+                    FrameDecoder::scoped(scope).unwrap(),
+                ),
+            ] {
+                for byte in frame {
+                    decoder.push_bytes(&[byte]);
+                }
+                assert_eq!(decoder.next_frame().unwrap(), Some((2, message.clone())));
+                assert!(decoder.next_frame().unwrap().is_none());
+            }
+        }
     }
 
     #[test]

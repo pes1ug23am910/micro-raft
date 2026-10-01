@@ -23,7 +23,7 @@ pub mod snapshot;
 pub mod types;
 
 pub use election::{decide_vote, RequestVoteRq};
-pub use message::{Effect, Input, RaftMessage};
+pub use message::{AppendConflictHint, Effect, Input, RaftMessage};
 pub use read::MAX_PENDING_READS;
 pub use replication::commit_advance;
 pub use types::{
@@ -585,6 +585,7 @@ impl RaftNode {
                     effects.push(Effect::Send {
                         to: *leader_id,
                         msg: RaftMessage::AppendEntriesReply {
+                            conflict: None,
                             term: self.hard.current_term,
                             success: false,
                             match_index: self.last_log_index(),
@@ -640,6 +641,7 @@ impl RaftNode {
                         true,
                         last_included_index,
                         contact_round,
+                        None,
                         effects,
                     );
                 }
@@ -717,12 +719,14 @@ impl RaftNode {
                 success,
                 match_index,
                 contact_round,
+                conflict,
             } => self.on_append_entries_reply(
                 from,
                 term,
                 success,
                 match_index,
                 contact_round,
+                conflict,
                 effects,
             ),
             RaftMessage::ReadProbe {
@@ -952,3 +956,6 @@ mod membership_protocol_tests;
 
 #[cfg(test)]
 mod applied_watermark_tests;
+
+#[cfg(test)]
+mod backtracking_tests;

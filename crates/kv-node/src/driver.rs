@@ -2321,6 +2321,7 @@ mod tests {
             .send((
                 2,
                 RaftMessage::AppendEntriesReply {
+                    conflict: None,
                     contact_round: 0,
                     term: 1,
                     success: true,
@@ -2412,6 +2413,7 @@ mod tests {
     }
     fn append_reply() -> RaftMessage {
         RaftMessage::AppendEntriesReply {
+            conflict: None,
             contact_round: 0,
             term: 1,
             success: true,
@@ -3344,6 +3346,7 @@ mod tests {
             Input::Message {
                 from: 2,
                 msg: RaftMessage::AppendEntriesReply {
+                    conflict: None,
                     term,
                     success: true,
                     match_index: 3,
@@ -3923,6 +3926,7 @@ mod tests {
                 group_id: "admin-driver".into(),
                 genesis_voters: vec![1],
                 message: Box::new(RaftMessage::AppendEntriesReply {
+                    conflict: None,
                     term: rig.node.hard.current_term,
                     success: true,
                     match_index: 2,
@@ -4001,6 +4005,7 @@ mod tests {
                 group_id: "admin-driver".into(),
                 genesis_voters: vec![1],
                 message: Box::new(RaftMessage::AppendEntriesReply {
+                    conflict: None,
                     term,
                     success: true,
                     match_index: index,

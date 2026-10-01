@@ -164,6 +164,7 @@ fn malformed_append_entries_leaves_core_and_virtual_disk_untouched() {
         vec![Effect::Send {
             to: 2,
             msg: RaftMessage::AppendEntriesReply {
+                conflict: None,
                 contact_round: 0,
                 term: 3,
                 success: false,

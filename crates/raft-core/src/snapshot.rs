@@ -494,7 +494,7 @@ impl RaftNode {
         }
         if installed {
             self.outgoing_snapshots.remove(&from);
-            self.on_append_entries_reply(from, term, true, match_index, 0, effects);
+            self.on_append_entries_reply(from, term, true, match_index, 0, None, effects);
             self.send_append_entries(effects);
         } else {
             let active = self
