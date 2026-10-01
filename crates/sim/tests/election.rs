@@ -52,11 +52,12 @@ fn split_vote_resolves() {
         sim.run_ms(310);
         for id in 1..=3 {
             assert!(
-                sim.node(id).hard.current_term >= 1,
+                matches!(sim.node(id).role, Role::PreCandidate { .. })
+                    && sim.node(id).hard.current_term == 0,
                 "seed={seed}: n{id} never campaigned during the blackout"
             );
         }
-        // Heal. Randomized timeouts must desynchronize the candidates.
+        // Heal. Randomized timeouts must desynchronize the pre-candidates.
         sim.faults.drop_prob = 0.0;
         let elected = sim.run_until(|s| s.leader().is_some(), 2_000);
         assert!(
@@ -80,6 +81,7 @@ fn stale_log_candidate_rejected() {
             sim.seed_hard_state(
                 id,
                 HardState {
+                    membership: None,
                     current_term: 3,
                     voted_for: None,
                 },
@@ -89,7 +91,8 @@ fn stale_log_candidate_rejected() {
         // receive and answer its solicitations (rejecting on R9b).
         sim.run_ms_ticking_only(&[1], 700);
         assert!(
-            sim.node(1).hard.current_term > 3,
+            matches!(sim.node(1).role, Role::PreCandidate { .. })
+                && sim.node(1).hard.current_term == 3,
             "seed={seed}: node 1 never campaigned"
         );
         assert!(
@@ -170,6 +173,7 @@ fn rejected_vote_does_not_reset_timer() {
         sim.seed_hard_state(
             id,
             HardState {
+                membership: None,
                 current_term: 3,
                 voted_for: None,
             },
@@ -185,10 +189,15 @@ fn rejected_vote_does_not_reset_timer() {
     );
 
     // Only node 1's clock runs; it campaigns (repeatedly). 2 and 3 receive
-    // the solicitations while frozen and refuse them.
+    // the pre-vote solicitations while frozen and refuse them.
+    let delivered_before = sim.stats().messages_delivered;
     sim.run_ms_ticking_only(&[1], 700);
     assert!(
-        sim.node(2).hard.current_term > 3,
+        sim.stats().messages_delivered > delivered_before,
+        "seed={seed}: no solicitation delivered"
+    );
+    assert!(
+        matches!(sim.node(1).role, Role::PreCandidate { .. }) && sim.node(2).hard.current_term == 3,
         "seed={seed}: node 2 never saw a solicitation"
     );
     assert_eq!(

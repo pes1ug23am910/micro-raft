@@ -10,13 +10,16 @@
 //! crash/restart, applied histories, and the Raft safety invariants.
 
 pub mod invariants;
+mod membership;
+mod snapshot;
+pub use snapshot::SnapshotFault;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use raft_core::rng::Pcg32;
 use raft_core::{
-    Command, Effect, Entry, HardState, Input, LogIndex, NodeId, RaftMessage, RaftNode, Role, Term,
-    TICK_MS,
+    Command, Effect, Entry, HardState, Input, LogIndex, NodeId, RaftMessage, RaftNode, Role,
+    SnapshotDescriptor, SnapshotTransferId, Term, TICK_MS,
 };
 
 use invariants::{CommittedRegistry, Invariants};
@@ -88,6 +91,9 @@ struct SimNode {
     /// Virtual disk — updated ONLY when a `Persist*` effect executes.
     disk_hard: HardState,
     disk_log: Vec<Entry>,
+    disk_snapshot: Option<snapshot::VirtualImage>,
+    core_prefix: Vec<Entry>,
+    snapshot_stage: Option<snapshot::VirtualStage>,
     /// For TermMonotonicity.
     last_term_seen: Term,
     /// Applied-command history: every `Effect::Apply` this boot has
@@ -111,6 +117,7 @@ struct Envelope {
 
 pub struct Sim {
     pub seed: u64,
+    genesis_voters: Vec<NodeId>,
     now_ms: u64,
     nodes: BTreeMap<NodeId, SimNode>,
     /// Virtual network: ordered by (deliver_at_ms, seq) — deterministic
@@ -126,6 +133,11 @@ pub struct Sim {
     committed: CommittedRegistry,
     persistence_mode: PersistenceMode,
     stats: FaultStats,
+    read_outcomes: Vec<(NodeId, Effect)>,
+    snapshot_images: BTreeMap<[u8; 32], snapshot::VirtualImage>,
+    snapshot_faults: BTreeMap<NodeId, SnapshotFault>,
+    snapshot_fault_hits: u64,
+    snapshots_installed: u64,
 }
 
 /// Syntactic half of the persist-before-observe contract.
@@ -170,6 +182,9 @@ impl Sim {
                     alive: true,
                     disk_hard: HardState::default(),
                     disk_log: Vec::new(),
+                    disk_snapshot: None,
+                    core_prefix: Vec::new(),
+                    snapshot_stage: None,
                     last_term_seen: 0,
                     applied: Vec::new(),
                     registered_commit: 0,
@@ -182,6 +197,7 @@ impl Sim {
             );
         }
         Sim {
+            genesis_voters: (1..=n_nodes).collect(),
             seed,
             now_ms: 0,
             nodes,
@@ -193,6 +209,11 @@ impl Sim {
             committed: CommittedRegistry::default(),
             persistence_mode: PersistenceMode::Durable,
             stats: FaultStats::default(),
+            read_outcomes: Vec::new(),
+            snapshot_images: BTreeMap::new(),
+            snapshot_faults: BTreeMap::new(),
+            snapshot_fault_hits: 0,
+            snapshots_installed: 0,
         }
     }
 
@@ -267,6 +288,22 @@ impl Sim {
         self.stats.effect_batches_audited += 1;
         for effect in effects {
             match effect {
+                Effect::MembershipRouteHint { .. }
+                | Effect::MembershipResult { .. }
+                | Effect::MembershipChanged { .. } => {
+                    self.assert_fully_durable(origin, "MembershipOutcome");
+                }
+                Effect::ReadSnapshotChunk { .. }
+                | Effect::StageSnapshotChunk { .. }
+                | Effect::PublishSnapshot { .. }
+                | Effect::ApplySnapshot { .. }
+                | Effect::CancelSnapshot { .. }
+                | Effect::SnapshotRejected { .. } => {
+                    self.execute_snapshot_effect(origin, effect);
+                    if !self.is_alive(origin) {
+                        return;
+                    }
+                }
                 Effect::PersistHardState(hs) => {
                     if self.persistence_mode == PersistenceMode::Durable {
                         self.nodes
@@ -312,6 +349,16 @@ impl Sim {
                 Effect::ProposeAccepted { .. } => {
                     self.assert_fully_durable(origin, "ProposeAccepted");
                 }
+                outcome @ Effect::ReadReady { .. } => {
+                    self.assert_fully_durable(origin, "ReadReady");
+                    self.read_outcomes.push((origin, outcome));
+                }
+                outcome @ Effect::ReadRejected { .. } => {
+                    // Stepdown rejection can precede an incoming leader's log
+                    // append in this batch; the newer term must be durable.
+                    self.assert_term_durable(origin, "ReadRejected");
+                    self.read_outcomes.push((origin, outcome));
+                }
                 Effect::ProposeRejected { .. } => {
                     self.assert_fully_durable(origin, "ProposeRejected");
                 }
@@ -347,6 +394,12 @@ impl Sim {
         assert_eq!(
             node.disk_log, node.core.log,
             "seed={}: n{origin} exposed {context} before its log was durable",
+            self.seed
+        );
+        assert_eq!(
+            node.disk_snapshot.as_ref().map(|image| &image.descriptor),
+            node.core.snapshot_descriptor(),
+            "seed={}: n{origin} exposed {context} before snapshot publication was durable",
             self.seed
         );
     }
@@ -410,6 +463,8 @@ impl Sim {
     }
 
     fn check_all_invariants(&mut self) {
+        // Immutable image witnesses retain compacted history. Compare every
+        // entry each step, but rebuild the expanded audit cache only on change.
         let ids: Vec<NodeId> = self.nodes.keys().copied().collect();
         let mut newly_committed = Vec::new();
         let mut new_leaders = Vec::new();
@@ -419,25 +474,62 @@ impl Sim {
 
         for &id in &ids {
             let node = self.nodes.get_mut(&id).expect("known id");
-            if node.core.log != node.observed_core_log {
+            if node.alive {
+                assert_eq!(
+                    node.core_prefix.len() as u64,
+                    node.core.snapshot_index(),
+                    "snapshot witness boundary mismatch"
+                );
+                assert_eq!(
+                    node.disk_snapshot.as_ref().map(|image| &image.descriptor),
+                    node.core.snapshot_descriptor(),
+                    "snapshot descriptor not durable"
+                );
+            }
+            if node
+                .core_prefix
+                .iter()
+                .chain(&node.core.log)
+                .ne(node.observed_core_log.iter())
+            {
+                node.observed_core_log.clear();
+                node.observed_core_log
+                    .extend(node.core_prefix.iter().cloned());
+                node.observed_core_log.extend(node.core.log.iter().cloned());
                 if node.alive {
-                    invariants::check_log_structure(self.seed, id, "core", &node.core.log);
+                    invariants::check_log_structure(self.seed, id, "core", &node.observed_core_log);
                 }
-                node.observed_core_log.clone_from(&node.core.log);
                 core_log_changed = true;
             }
-            if node.disk_log != node.observed_disk_log {
+            let disk_prefix = node
+                .disk_snapshot
+                .as_ref()
+                .map_or(&[][..], |image| image.prefix.as_slice());
+            if disk_prefix
+                .iter()
+                .chain(&node.disk_log)
+                .ne(node.observed_disk_log.iter())
+            {
+                node.observed_disk_log.clear();
+                node.observed_disk_log.extend(disk_prefix.iter().cloned());
+                node.observed_disk_log.extend(node.disk_log.iter().cloned());
                 if self.persistence_mode == PersistenceMode::Durable {
-                    invariants::check_log_structure(self.seed, id, "durable", &node.disk_log);
+                    invariants::check_log_structure(
+                        self.seed,
+                        id,
+                        "durable",
+                        &node.observed_disk_log,
+                    );
                 }
-                node.observed_disk_log.clone_from(&node.disk_log);
                 disk_log_changed = true;
             }
+            let core_history = &node.observed_core_log;
             if node.applied.len() != node.observed_applied_len {
                 node.observed_applied_len = node.applied.len();
                 applied_changed = true;
             }
 
+            let previously_leader = node.observed_leader_term == Some(node.core.hard.current_term);
             let leader_term = node
                 .alive
                 .then(|| node.core.is_leader().then_some(node.core.hard.current_term))
@@ -445,7 +537,7 @@ impl Sim {
             if leader_term != node.observed_leader_term {
                 node.observed_leader_term = leader_term;
                 if let Some(term) = leader_term {
-                    new_leaders.push((id, term, node.core.log.clone()));
+                    new_leaders.push((id, term, core_history.clone()));
                 }
             }
 
@@ -460,7 +552,7 @@ impl Sim {
             );
             node.last_term_seen = node.core.hard.current_term;
 
-            let last_index = node.core.log.last().map_or(0, |entry| entry.index);
+            let last_index = node.core.last_log_index();
             assert!(
                 node.core.last_applied <= node.core.commit_index
                     && node.core.commit_index <= last_index,
@@ -475,10 +567,19 @@ impl Sim {
                 "seed={}: n{id} emitted Apply history disagrees with last_applied",
                 self.seed
             );
-            if node.core.is_leader() && node.core.commit_index > node.registered_commit {
+            if (node.core.is_leader() || previously_leader)
+                && node.core.commit_index > node.registered_commit
+            {
+                if self.committed.get(node.core.commit_index).is_none() {
+                    assert_eq!(
+                        core_history[node.core.commit_index as usize - 1].term,
+                        node.core.hard.current_term,
+                        "witness: leader advanced commitment without a current-term entry"
+                    );
+                }
                 for index in (node.registered_commit + 1)..=node.core.commit_index {
                     newly_committed.push(
-                        node.core.log[usize::try_from(index - 1).expect("log index fits usize")]
+                        core_history[usize::try_from(index - 1).expect("log index fits usize")]
                             .clone(),
                     );
                 }
@@ -507,7 +608,7 @@ impl Sim {
                         self.seed
                     );
                     assert_eq!(
-                        node.core.log[offset].command, *command,
+                        node.observed_core_log[offset].command, *command,
                         "seed={}: n{id} applied command differs from its log at index {expected}",
                         self.seed
                     );
@@ -547,9 +648,9 @@ impl Sim {
                         invariants::check_log_matching(
                             self.seed,
                             a_id,
-                            &a.core.log,
+                            &a.observed_core_log,
                             b_id,
-                            &b.core.log,
+                            &b.observed_core_log,
                         );
                     }
                     if applied_changed {
@@ -561,9 +662,9 @@ impl Sim {
                         invariants::check_log_matching(
                             self.seed,
                             a_id,
-                            &a.disk_log,
+                            &a.observed_disk_log,
                             b_id,
-                            &b.disk_log,
+                            &b.observed_disk_log,
                         );
                     }
                 }
@@ -579,24 +680,26 @@ impl Sim {
         if self.persistence_mode == PersistenceMode::Durable
             && (disk_log_changed || commitment_changed)
         {
-            let majority = self.nodes.len() / 2 + 1;
+            let committed_history: Vec<_> = self
+                .committed
+                .iter()
+                .map(|(_, entry)| entry.clone())
+                .collect();
+            let obligations =
+                membership::required_quorums(&self.genesis_voters, &committed_history);
             for (&index, entry) in self.committed.iter() {
-                let durable_copies = self
+                let durable: BTreeSet<_> = self
                     .nodes
-                    .values()
-                    .filter(|node| {
-                        node.disk_log
-                            .get(usize::try_from(index - 1).expect("log index fits usize"))
-                            == Some(entry)
+                    .iter()
+                    .filter_map(|(&id, node)| {
+                        (node.observed_disk_log.get(index as usize - 1) == Some(entry))
+                            .then_some(id)
                     })
-                    .count();
-                assert!(
-                    durable_copies >= majority,
-                    "seed={}: CommittedDurability violated — entry {entry:?} has only \
-                     {durable_copies}/{} durable copies (majority {majority})",
-                    self.seed,
-                    self.nodes.len()
-                );
+                    .collect();
+                let (old, new) = &obligations[&index];
+                assert!(membership::witnessed_quorum(old,new.as_ref(),&durable),
+                    "seed={}: CommittedDurability violated at {}: required old={old:?},new={new:?}; durable={durable:?}",
+                    self.seed,index);
             }
         }
     }
@@ -720,6 +823,8 @@ impl Sim {
         node.core = RaftNode::new(id, peers, node_seed(self.seed, id, node.boot_count));
         node.alive = false;
         node.applied.clear();
+        node.core_prefix.clear();
+        node.snapshot_stage = None;
         self.stats.crashes += 1;
 
         let before = self.net.len();
@@ -733,7 +838,7 @@ impl Sim {
     /// tick at the current virtual time initializes a fresh election deadline
     /// before any queued message can arrive.
     pub fn restart(&mut self, id: NodeId) -> bool {
-        let (peers, hard, log, boot_count) = {
+        let (peers, hard, log, boot_count, snapshot) = {
             let node = self.nodes.get_mut(&id).expect("known node id");
             if node.alive {
                 return false;
@@ -744,20 +849,38 @@ impl Sim {
                 node.disk_hard.clone(),
                 node.disk_log.clone(),
                 node.boot_count,
+                node.disk_snapshot.clone(),
             )
         };
-        let mut core =
-            RaftNode::restore(id, peers, node_seed(self.seed, id, boot_count), hard, log)
-                .expect("virtual disk always contains valid recovered state");
-        let effects = core.step(Input::Tick {
-            now_ms: self.now_ms,
-        });
+        let mut core = RaftNode::restore_with_snapshot(
+            id,
+            peers,
+            node_seed(self.seed, id, boot_count),
+            hard,
+            snapshot.as_ref().map(|image| image.descriptor.clone()),
+            log,
+        )
+        .expect("virtual disk always contains valid recovered state");
+        let effects = core.step(Input::Recover);
         let node = self.nodes.get_mut(&id).expect("known node id");
         node.core = core;
         node.alive = true;
-        node.applied.clear();
+        node.core_prefix = snapshot
+            .as_ref()
+            .map_or_else(Vec::new, |image| image.prefix.clone());
+        node.applied = node
+            .core_prefix
+            .iter()
+            .map(|entry| (entry.index, entry.command.clone()))
+            .collect();
         self.stats.restarts += 1;
         self.execute_effects(id, effects);
+        self.read_input(
+            id,
+            Input::Tick {
+                now_ms: self.now_ms,
+            },
+        );
         self.check_all_invariants();
         true
     }
@@ -811,6 +934,32 @@ impl Sim {
         self.execute_effects(id, effects);
         self.check_all_invariants();
         copy
+    }
+
+    /// Request a quorum read barrier through the same core/effect audit path.
+    pub fn read_index(&mut self, id: NodeId, request_id: u64) -> Vec<Effect> {
+        self.read_input(id, Input::ReadIndex { request_id })
+    }
+
+    pub fn cancel_read(&mut self, id: NodeId, request_id: u64) -> Vec<Effect> {
+        self.read_input(id, Input::CancelRead { request_id })
+    }
+
+    fn read_input(&mut self, id: NodeId, input: Input) -> Vec<Effect> {
+        let node = self.nodes.get_mut(&id).expect("known node id");
+        if !node.alive {
+            return Vec::new();
+        }
+        let effects = node.core.step(input);
+        let copy = effects.clone();
+        self.execute_effects(id, effects);
+        self.check_all_invariants();
+        copy
+    }
+
+    /// Drain observed read completions, including asynchronous network replies.
+    pub fn take_read_outcomes(&mut self) -> Vec<(NodeId, Effect)> {
+        std::mem::take(&mut self.read_outcomes)
     }
 
     /// This node's applied-command history, in application order.

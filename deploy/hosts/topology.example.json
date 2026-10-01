@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "run_id": "mr-example-12345",
+  "expires_unix": 0,
+  "binary": "/opt/micro-raft/mr-example-12345/kv-node",
+  "binary_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "raft_port": 9100,
+  "http_port": 8100,
+  "probe_port": 9101,
+  "nodes": {
+    "node1": {
+      "instance_id": "REPLACE-VM-ID-1",
+      "private_ip": "10.23.0.1",
+      "local": true,
+      "ssh_host": "10.23.0.1",
+      "ssh_user": "ubuntu",
+      "ssh_port": 22,
+      "agent_path": "/opt/micro-raft/mr-example-12345/deploy/hosts/host_agent.py",
+      "config_path": "/opt/micro-raft/mr-example-12345/node1.json"
+    },
+    "node2": {
+      "instance_id": "REPLACE-VM-ID-2",
+      "private_ip": "10.23.0.2",
+      "local": false,
+      "ssh_host": "10.23.0.2",
+      "ssh_user": "ubuntu",
+      "ssh_port": 22,
+      "agent_path": "/opt/micro-raft/mr-example-12345/deploy/hosts/host_agent.py",
+      "config_path": "/opt/micro-raft/mr-example-12345/node2.json"
+    },
+    "node3": {
+      "instance_id": "REPLACE-VM-ID-3",
+      "private_ip": "10.23.0.3",
+      "local": false,
+      "ssh_host": "10.23.0.3",
+      "ssh_user": "ubuntu",
+      "ssh_port": 22,
+      "agent_path": "/opt/micro-raft/mr-example-12345/deploy/hosts/host_agent.py",
+      "config_path": "/opt/micro-raft/mr-example-12345/node3.json"
+    }
+  }
+}

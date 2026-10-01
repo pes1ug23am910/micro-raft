@@ -1,0 +1,65 @@
+x-node: &node
+  image: ${MICRO_RAFT_IMAGE:-micro-raft:local}
+  build:
+    context: ../..
+    dockerfile: deploy/docker/Dockerfile
+  networks: [raft]
+  stop_grace_period: 15s
+  healthcheck:
+    test: [CMD, curl, --fail, --silent, --show-error, --max-time, "2", "http://127.0.0.1:8100/status"]
+    interval: 5s
+    timeout: 3s
+    start_period: 5s
+    retries: 3
+
+services:
+  node1:
+    <<: *node
+    command:
+      - --id=1
+      - --peers=2@node2:7100,3@node3:7100
+      - --data-dir=/data
+      - --raft-listen=0.0.0.0:7100
+      - --raft-advertise=node1:7100
+      - --http-listen=0.0.0.0:8100
+      - --http-advertise=node1:8100
+    volumes: [node1-data:/data]
+  node2:
+    <<: *node
+    command:
+      - --id=2
+      - --peers=1@node1:7100,3@node3:7100
+      - --data-dir=/data
+      - --raft-listen=0.0.0.0:7100
+      - --raft-advertise=node2:7100
+      - --http-listen=0.0.0.0:8100
+      - --http-advertise=node2:8100
+    volumes: [node2-data:/data]
+  node3:
+    <<: *node
+    command:
+      - --id=3
+      - --peers=1@node1:7100,2@node2:7100
+      - --data-dir=/data
+      - --raft-listen=0.0.0.0:7100
+      - --raft-advertise=node3:7100
+      - --http-listen=0.0.0.0:8100
+      - --http-advertise=node3:8100
+    volumes: [node3-data:/data]
+  client:
+    image: ${MICRO_RAFT_CLIENT_IMAGE:-micro-raft-client:local}
+    build:
+      context: client
+    networks: [raft]
+    volumes: [client-ledger:/ledger]
+    command: [status]
+
+networks:
+  raft:
+    internal: true
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+  client-ledger:

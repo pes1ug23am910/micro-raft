@@ -1,11 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/kv-node", "crates/raft-core", "crates/sim"]
+members = ["crates/kv-node", "crates/raft-core", "crates/sim", "crates/state-store", "crates/shard-service"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 publish = false
+license = "MIT"
 
 # Keep the entire workspace warning-free by default.
 [workspace.lints.rust]

@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-01",
+  "source_archive_sha256": "7a9f04fc10754deb4319dc2b6e073fc2498980556299683ce89e16e87c256fe4",
+  "release_binary_sha256": "ba0e92b3ff79763beb113f0c366145aa0b92fb1ef040ee5afddef5079ec2074a",
+  "measurement": {
+    "cases_passed": 6,
+    "acknowledged_writes_and_readbacks": 1584,
+    "write_errors": 0,
+    "order": [
+      "single",
+      "batch",
+      "batch",
+      "single",
+      "single",
+      "batch"
+    ],
+    "per_case": {
+      "sparse_sequential": 8,
+      "busy_operations": 256,
+      "busy_concurrency": 32,
+      "value_padding_bytes": 128,
+      "snapshot_threshold": 0
+    },
+    "median_leader_append_syncs": {
+      "single": 264,
+      "batch": 48
+    },
+    "median_all_replica_append_syncs": {
+      "single": 312,
+      "batch": 96
+    },
+    "median_busy_ack_per_second": {
+      "single": 255.60919909550287,
+      "batch": 256.32722733842024
+    },
+    "median_busy_p95_ms": {
+      "single": 129.5827,
+      "batch": 129.7656
+    },
+    "interpretation": "Fewer WAL append barriers were observed. Throughput and latency were essentially unchanged in this small local workload; no general speedup or statistical significance is claimed.",
+    "cleanup": "All owned child processes deliberately hard-terminated and reaped; data and logs retained. This does not test graceful shutdown or physical power loss."
+  },
+  "limits": [
+    "Loopback on one Windows 11 host and NTFS data volume; three paired samples only.",
+    "Counter scope is WAL append sync_all calls, not every filesystem sync or physical-device writes.",
+    "Proposal queue is 256 plus one deferred request and bounded collection; KV state/WAL growth are not globally bounded by batching.",
+    "The asynchronous shutdown budget cannot interrupt an OS sync already in progress."
+  ]
+}

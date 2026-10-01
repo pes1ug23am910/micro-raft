@@ -49,15 +49,11 @@ pub fn commit_advance(
     match_indexes: &[LogIndex],
 ) -> Option<LogIndex> {
     let majority = match_indexes.len() / 2 + 1;
-    let mut n = log.last().map_or(0, |e| e.index);
-    while n > current {
-        let replicated = match_indexes.iter().filter(|&&m| m >= n).count();
-        if replicated >= majority
-            && log[usize::try_from(n - 1).expect("log index fits usize")].term == current_term
-        {
-            return Some(n);
+    for entry in log.iter().rev().take_while(|entry| entry.index > current) {
+        let replicated = match_indexes.iter().filter(|&&m| m >= entry.index).count();
+        if replicated >= majority && entry.term == current_term {
+            return Some(entry.index);
         }
-        n -= 1;
     }
     None
 }
@@ -71,13 +67,21 @@ impl RaftNode {
         let Role::Leader { next_index, .. } = &self.role else {
             return;
         };
-        for &peer in &self.peers {
+        let next_index = next_index.clone();
+        for peer in self.peers.clone() {
+            self.advertise_replication_membership(peer, effects);
             let next = next_index
                 .get(&peer)
-                .map_or(self.last_log_index() + 1, |&n| n);
+                .map_or(self.last_log_index().saturating_add(1), |&n| n);
+            if next <= self.snapshot_index() {
+                self.send_snapshot_chunk(peer, effects);
+                continue;
+            }
+            self.outgoing_snapshots.remove(&peer);
             let prev_log_index = next - 1;
             let prev_log_term = self.term_at(prev_log_index);
-            let from = usize::try_from(prev_log_index).expect("log index fits usize");
+            let from = usize::try_from(prev_log_index - self.snapshot_index())
+                .expect("log offset fits usize");
             let to = from.saturating_add(MAX_APPEND_ENTRIES).min(self.log.len());
             let entries = self
                 .log
@@ -92,6 +96,7 @@ impl RaftNode {
                     prev_log_term,
                     entries,
                     leader_commit: self.commit_index,
+                    contact_round: self.contact_round,
                 },
             });
         }
@@ -102,25 +107,58 @@ impl RaftNode {
     /// then rides the next heartbeat (R17). Anyone else refuses, hinting at
     /// the last known leader so the client can retry there.
     pub(crate) fn on_client_propose(&mut self, command: Command, effects: &mut Vec<Effect>) {
-        if !matches!(self.role, Role::Leader { .. }) {
-            effects.push(Effect::ProposeRejected {
-                leader_hint: self.leader_hint,
-            });
+        self.on_client_propose_batch(vec![command], effects);
+    }
+
+    pub(crate) fn on_client_propose_batch(
+        &mut self,
+        commands: Vec<Command>,
+        effects: &mut Vec<Effect>,
+    ) {
+        if commands.is_empty() {
             return;
         }
-        let entry = Entry {
-            index: self.last_log_index() + 1,
-            term: self.hard.current_term,
-            command,
-        };
-        self.log.push(entry.clone());
-        // The persist precedes the accept — nothing may act on
-        // an entry the leader itself hasn't made durable.
+        let last = self.last_log_index();
+        let final_index = last
+            .checked_add(commands.len() as u64)
+            .filter(|index| *index < LogIndex::MAX);
+        if !self.is_leader()
+            || !self.is_voter(self.id)
+            || commands
+                .iter()
+                .any(|command| matches!(command, Command::Configuration(_)))
+            || commands.len() > crate::MAX_PROPOSAL_BATCH
+            || final_index.is_none()
+        {
+            effects.extend(commands.iter().map(|_| Effect::ProposeRejected {
+                leader_hint: self.leader_hint,
+            }));
+            return;
+        }
+        let entries: Vec<_> = commands
+            .into_iter()
+            .enumerate()
+            .map(|(offset, command)| Entry {
+                index: last + offset as u64 + 1,
+                term: self.hard.current_term,
+                command,
+            })
+            .collect();
+        self.log.extend(entries.iter().cloned());
+        // All durable bytes precede the first acceptance, including in a
+        // singleton where this batch can immediately commit and apply.
         effects.push(Effect::PersistLogEntries {
             truncate_from: None,
-            entries: vec![entry.clone()],
+            entries: entries.clone(),
         });
-        effects.push(Effect::ProposeAccepted { index: entry.index });
+        effects.extend(
+            entries
+                .iter()
+                .map(|entry| Effect::ProposeAccepted { index: entry.index }),
+        );
+        if self.self_quorum() {
+            self.advance_commit(final_index.expect("checked range"), effects);
+        }
     }
 
     /// The follower's accept path: R12 consistency check, R13 conflict
@@ -136,6 +174,7 @@ impl RaftNode {
         entries: Vec<Entry>,
         payload_last_index: LogIndex,
         leader_commit: LogIndex,
+        contact_round: u64,
         effects: &mut Vec<Effect>,
     ) {
         // R3: a stale leader gets the current term and a rejection.
@@ -146,6 +185,7 @@ impl RaftNode {
                     term: self.hard.current_term,
                     success: false,
                     match_index: self.last_log_index(),
+                    contact_round,
                 },
             });
             return;
@@ -158,25 +198,77 @@ impl RaftNode {
         self.reset_election_deadline();
         // R20: this sender is the freshest leader sighting we have.
         self.leader_hint = Some(leader_id);
+        self.last_leader_contact_ms = Some(self.now_ms);
+
+        if prev_log_index < self.snapshot_index() {
+            effects.push(Effect::Send {
+                to: leader_id,
+                msg: RaftMessage::CompactedPrefix {
+                    term: self.hard.current_term,
+                    last_included_index: self.snapshot_index(),
+                    last_included_term: self.snapshot_term(),
+                    contact_round,
+                },
+            });
+            return;
+        }
 
         // R12: the consistency check — do we hold the leader's anchor entry?
         // Failure still counted the sender as leader above; the reply carries
         // my last log index so the leader can retry from the following index.
-        if prev_log_index > 0
-            && (self.last_log_index() < prev_log_index
-                || self.term_at(prev_log_index) != prev_log_term)
-        {
+        if self.log_term(prev_log_index) != Some(prev_log_term) {
             effects.push(Effect::Send {
                 to: leader_id,
                 msg: RaftMessage::AppendEntriesReply {
                     term: self.hard.current_term,
                     success: false,
                     match_index: self.last_log_index(),
+                    contact_round,
                 },
             });
             return;
         }
 
+        // Refuse any conflict inside the already committed prefix.
+        if entries.iter().any(|entry| {
+            entry.index <= self.commit_index && self.log_term(entry.index) != Some(entry.term)
+        }) {
+            effects.push(Effect::Send {
+                to: leader_id,
+                msg: RaftMessage::AppendEntriesReply {
+                    term: self.hard.current_term,
+                    success: false,
+                    match_index: self.last_log_index(),
+                    contact_round,
+                },
+            });
+            return;
+        }
+
+        let mut candidate = self.log.clone();
+        for entry in &entries {
+            let offset = (entry.index - self.snapshot_index() - 1) as usize;
+            if candidate
+                .get(offset)
+                .is_some_and(|old| old.term == entry.term)
+            {
+                continue;
+            }
+            candidate.truncate(offset);
+            candidate.push(entry.clone());
+        }
+        if !self.valid_configuration_suffix(&candidate) {
+            effects.push(Effect::Send {
+                to: leader_id,
+                msg: RaftMessage::AppendEntriesReply {
+                    term: self.hard.current_term,
+                    success: false,
+                    match_index: self.last_log_index(),
+                    contact_round: 0,
+                },
+            });
+            return;
+        }
         // R13: walk the payload against the existing log. Truncate ONLY at
         // the first same-index/different-term conflict — the sole situation
         // in which entries are ever deleted, and only here, on a non-leader
@@ -193,8 +285,10 @@ impl RaftNode {
                 // First real conflict: everything from here on is wreckage
                 // from a dead leader; cut it and take the leader's suffix.
                 truncate_from = Some(entry.index);
-                self.log
-                    .truncate(usize::try_from(entry.index - 1).expect("log index fits usize"));
+                self.log.truncate(
+                    usize::try_from(entry.index - self.snapshot_index() - 1)
+                        .expect("log offset fits usize"),
+                );
                 appended.push(entry);
             }
         }
@@ -207,22 +301,22 @@ impl RaftNode {
                 entries: appended,
             });
         }
+        // Persist membership commitment before replying or applying commands.
+        let new_commit = leader_commit.min(payload_last_index);
+        if new_commit > self.commit_index {
+            self.advance_commit(new_commit, effects);
+        } else {
+            self.refresh_effective_membership(effects);
+        }
         effects.push(Effect::Send {
             to: leader_id,
             msg: RaftMessage::AppendEntriesReply {
                 term: self.hard.current_term,
                 success: true,
                 match_index: payload_last_index,
+                contact_round,
             },
         });
-
-        // R14: lift commit_index toward the leader's, bounded by what this
-        // RPC covered — never backwards — then apply in order (R4).
-        let new_commit = leader_commit.min(payload_last_index);
-        if new_commit > self.commit_index {
-            self.commit_index = new_commit;
-            self.apply_committed(effects);
-        }
     }
 
     /// R18: success raises this peer's watermark monotonically and probes
@@ -235,6 +329,7 @@ impl RaftNode {
         term: Term,
         success: bool,
         match_index: LogIndex,
+        contact_round: u64,
         effects: &mut Vec<Effect>,
     ) {
         // R3: stale replies — an older term, or arriving in a role that no
@@ -244,7 +339,10 @@ impl RaftNode {
             return;
         }
         let own_last = self.last_log_index();
-        let advanced = {
+        if success && match_index > own_last {
+            return;
+        }
+        let successful = {
             let Role::Leader {
                 next_index,
                 match_index: peer_match,
@@ -257,23 +355,27 @@ impl RaftNode {
             else {
                 return; // not a peer of this cluster
             };
+            // A consistency rejection still proves the peer heard this round.
+            // Old-round replication information remains useful, but cannot renew
+            // leadership. The exact round is term-scoped and never reused.
+            if contact_round != 0 && contact_round == self.contact_round {
+                self.quorum_contacts.insert(from);
+            }
             if success {
                 // R18: monotone — a duplicate or reordered success can never
                 // move the watermark backwards.
                 *matched = (*matched).max(match_index);
                 *next = matched.saturating_add(1);
-                // R19: the leader counts itself via its own log length.
-                let mut all: Vec<LogIndex> = peer_match.values().copied().collect();
-                all.push(own_last);
-                commit_advance(self.commit_index, self.hard.current_term, &self.log, &all)
+                true
             } else {
                 *next = 1.max(next.saturating_sub(1).min(match_index.saturating_add(1)));
-                None
+                false
             }
         };
-        if let Some(n) = advanced {
-            self.commit_index = n;
-            self.apply_committed(effects); // R4
+        if successful {
+            if let Some(n) = self.quorum_commit_candidate() {
+                self.advance_commit(n, effects);
+            }
         }
     }
 }
@@ -313,6 +415,7 @@ mod tests {
         entries: &[(LogIndex, Term)],
     ) -> RaftMessage {
         RaftMessage::AppendEntries {
+            contact_round: 0,
             term: message_term,
             leader_id: 2,
             prev_log_index,
@@ -357,6 +460,7 @@ mod tests {
             vec![Effect::Send {
                 to: 2,
                 msg: RaftMessage::AppendEntriesReply {
+                    contact_round: 0,
                     term: 3,
                     success: false,
                     match_index: 1,
@@ -416,7 +520,11 @@ mod tests {
             assert!(effects.iter().any(|effect| matches!(
                 effect,
                 Effect::Send {
-                    msg: RaftMessage::AppendEntriesReply { success: false, .. },
+                    msg: RaftMessage::AppendEntriesReply {
+                        contact_round: 0,
+                        success: false,
+                        ..
+                    },
                     ..
                 }
             )));
@@ -498,7 +606,7 @@ mod tests {
             matched += u64::try_from(entries.len()).expect("batch length fits");
 
             let mut reply_effects = Vec::new();
-            node.on_append_entries_reply(2, 4, true, matched, &mut reply_effects);
+            node.on_append_entries_reply(2, 4, true, matched, 0, &mut reply_effects);
         }
 
         assert_eq!(batch_sizes, vec![MAX_APPEND_ENTRIES, MAX_APPEND_ENTRIES, 5]);

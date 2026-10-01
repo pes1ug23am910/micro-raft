@@ -4,6 +4,7 @@ description = "Pure, deterministic Raft state machine (sans-I/O): inputs in, eff
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [lints]
 workspace = true
@@ -11,3 +12,6 @@ workspace = true
 # Keep the consensus core I/O-free and its dependency surface minimal.
 [dependencies]
 serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = "1"

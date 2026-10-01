@@ -187,6 +187,7 @@ fn deep_divergence_repaired() {
             sim.seed_hard_state(
                 id,
                 HardState {
+                    membership: None,
                     current_term: 3,
                     voted_for: None,
                 },
@@ -270,6 +271,7 @@ fn figure8_prior_term_not_committed_by_count() {
             sim.seed_hard_state(
                 id,
                 HardState {
+                    membership: None,
                     current_term: term,
                     voted_for: Some(voted),
                 },
@@ -321,6 +323,7 @@ fn figure8_prior_term_not_committed_by_count() {
                 prev_log_term: 1,
                 entries: vec![e2.clone()],
                 leader_commit: 0,
+                contact_round: 0,
             },
         );
         // Let S3's success reply reach S1's bookkeeping (clocks still frozen).

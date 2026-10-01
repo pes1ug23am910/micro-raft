@@ -5,8 +5,8 @@
 //! independently of node state transitions.
 
 use crate::message::{Effect, RaftMessage};
-use crate::types::{Command, Entry, HardState, LogIndex, NodeId, Role, Term};
-use crate::{RaftNode, HEARTBEAT_MS};
+use crate::types::{CampaignId, Command, Entry, HardState, LogIndex, NodeId, Role, Term};
+use crate::{RaftNode, CHECK_QUORUM_MS, HEARTBEAT_MS};
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -41,10 +41,136 @@ pub fn decide_vote(hard: &HardState, my_last: (LogIndex, Term), req: &RequestVot
 }
 
 impl RaftNode {
+    /// Probe reachability and log eligibility without changing durable state.
+    pub(crate) fn start_pre_vote(&mut self, effects: &mut Vec<Effect>) {
+        if !self.is_voter(self.id) {
+            return;
+        }
+        self.cancel_incoming_snapshot(effects);
+        let (Some(prospective_term), Some(sequence)) = (
+            self.hard.current_term.checked_add(1),
+            self.campaign_sequence.checked_add(1),
+        ) else {
+            // Counter exhaustion is passive, never wrap or reuse correlation.
+            self.campaign_exhausted = true;
+            self.become_follower(effects);
+            return;
+        };
+        self.campaign_sequence = sequence;
+        self.leader_hint = None;
+        let campaign_id = CampaignId {
+            incarnation: self.campaign_incarnation,
+            sequence,
+        };
+        self.role = Role::PreCandidate {
+            prospective_term,
+            campaign_id,
+            votes_received: BTreeSet::from([self.id]),
+        };
+        self.reset_election_deadline();
+        if self.self_quorum() {
+            self.start_election(effects);
+            return;
+        }
+        effects.push(Effect::RoleChanged {
+            role_name: "PreCandidate",
+            term: self.hard.current_term,
+        });
+        for &peer in &self.peers {
+            if !self.is_voter(peer) {
+                continue;
+            }
+            self.advertise_membership(peer, effects);
+            effects.push(Effect::Send {
+                to: peer,
+                msg: RaftMessage::PreVote {
+                    prospective_term,
+                    campaign_id,
+                    candidate_id: self.id,
+                    last_log_index: self.last_log_index(),
+                    last_log_term: self.last_log_term(),
+                },
+            });
+        }
+    }
+
+    pub(crate) fn on_pre_vote(
+        &mut self,
+        prospective_term: Term,
+        campaign_id: CampaignId,
+        candidate_id: NodeId,
+        last_log_index: LogIndex,
+        last_log_term: Term,
+        effects: &mut Vec<Effect>,
+    ) {
+        let recent_leader = self
+            .last_leader_contact_ms
+            .is_some_and(|at| self.now_ms.saturating_sub(at) < CHECK_QUORUM_MS);
+        let fresh_log =
+            (last_log_term, last_log_index) >= (self.last_log_term(), self.last_log_index());
+        let vote_granted = self.may_vote_for(
+            candidate_id,
+            prospective_term,
+            true,
+            last_log_index,
+            last_log_term,
+        ) && prospective_term > self.hard.current_term
+            && fresh_log
+            && !self.is_leader()
+            && !recent_leader;
+        effects.push(Effect::Send {
+            to: candidate_id,
+            msg: RaftMessage::PreVoteReply {
+                term: self.hard.current_term,
+                prospective_term,
+                campaign_id,
+                vote_granted,
+            },
+        });
+    }
+
+    pub(crate) fn on_pre_vote_reply(
+        &mut self,
+        from: NodeId,
+        term: Term,
+        prospective_term: Term,
+        campaign_id: CampaignId,
+        vote_granted: bool,
+        effects: &mut Vec<Effect>,
+    ) {
+        if !vote_granted || term >= prospective_term || !self.is_voter(from) {
+            return;
+        }
+        let quorum = self.voter_config().clone();
+        let Role::PreCandidate {
+            prospective_term: expected_term,
+            campaign_id: expected_id,
+            votes_received,
+        } = &mut self.role
+        else {
+            return;
+        };
+        if prospective_term != *expected_term || campaign_id != *expected_id {
+            return;
+        }
+        votes_received.insert(from);
+        if quorum.has_quorum(votes_received) {
+            self.start_election(effects);
+        }
+    }
+
     /// R8: increment term, vote for self, become Candidate, reset the
     /// deadline (R6c), persist BEFORE soliciting, then solicit every peer.
     pub(crate) fn start_election(&mut self, effects: &mut Vec<Effect>) {
-        self.hard.current_term += 1;
+        if !self.is_voter(self.id) {
+            return;
+        }
+        let Some(term) = self.hard.current_term.checked_add(1) else {
+            self.campaign_exhausted = true;
+            self.become_follower(effects);
+            return;
+        };
+        self.hard.current_term = term;
         self.hard.voted_for = Some(self.id);
         let mut votes_received = BTreeSet::new();
         votes_received.insert(self.id);
@@ -53,12 +179,20 @@ impl RaftNode {
         // Persist before soliciting votes. Otherwise a crash could erase the
         // candidate's self-vote and allow it to vote twice in one term.
         effects.push(Effect::PersistHardState(self.hard.clone()));
+        if self.self_quorum() {
+            self.become_leader(effects);
+            return;
+        }
         effects.push(Effect::RoleChanged {
             role_name: "Candidate",
             term: self.hard.current_term,
         });
         let (last_log_index, last_log_term) = (self.last_log_index(), self.last_log_term());
         for &peer in &self.peers {
+            if !self.is_voter(peer) {
+                continue;
+            }
+            self.advertise_membership(peer, effects);
             effects.push(Effect::Send {
                 to: peer,
                 msg: RaftMessage::RequestVote {
@@ -97,11 +231,12 @@ impl RaftNode {
             last_log_index,
             last_log_term,
         };
-        let grant = decide_vote(
-            &self.hard,
-            (self.last_log_index(), self.last_log_term()),
-            &req,
-        );
+        let grant = self.may_vote_for(candidate_id, term, false, last_log_index, last_log_term)
+            && decide_vote(
+                &self.hard,
+                (self.last_log_index(), self.last_log_term()),
+                &req,
+            );
         if grant {
             self.hard.voted_for = Some(candidate_id);
             self.reset_election_deadline(); // R6a: granting resets the timer…
@@ -129,16 +264,16 @@ impl RaftNode {
     ) {
         // R3: stale replies — an older term, or arriving in a role that no
         // longer expects them — are ignored entirely.
-        if term != self.hard.current_term || !vote_granted || !self.peers.contains(&from) {
+        if term != self.hard.current_term || !vote_granted || !self.is_voter(from) {
             return;
         }
-        let majority = self.majority();
+        let quorum = self.voter_config().clone();
         let won = {
             let Role::Candidate { votes_received } = &mut self.role else {
                 return;
             };
             votes_received.insert(from);
-            votes_received.len() >= majority
+            quorum.has_quorum(votes_received)
         };
         if won {
             self.become_leader(effects);
@@ -151,7 +286,16 @@ impl RaftNode {
     /// AppendEntries out. The NoOp is what lets R19(b) commit something from
     /// this term promptly, unlocking everything before it (Figure 8).
     pub(crate) fn become_leader(&mut self, effects: &mut Vec<Effect>) {
-        let next = self.last_log_index() + 1;
+        let Some(next) = self
+            .last_log_index()
+            .checked_add(1)
+            .filter(|next| *next < LogIndex::MAX)
+        else {
+            self.campaign_exhausted = true;
+            self.become_follower(effects);
+            self.leader_hint = None;
+            return;
+        };
         let mut next_index = BTreeMap::new();
         let mut match_index = BTreeMap::new();
         for &peer in &self.peers {
@@ -162,6 +306,14 @@ impl RaftNode {
             next_index,
             match_index,
         };
+        self.read_context = 0;
+        debug_assert!(
+            self.pending_reads.is_empty(),
+            "old leader reads must be cancelled"
+        );
+        self.contact_round = 1;
+        self.quorum_deadline_ms = self.now_ms.saturating_add(CHECK_QUORUM_MS);
+        self.quorum_contacts = BTreeSet::from([self.id]);
         let noop = Entry {
             index: next,
             term: self.hard.current_term,
@@ -173,12 +325,26 @@ impl RaftNode {
             truncate_from: None,
             entries: vec![noop],
         });
+        let mut committed = Vec::new();
+        if self.self_quorum() {
+            self.advance_commit(self.last_log_index(), &mut committed);
+        }
+        for effect in &committed {
+            if matches!(effect, Effect::PersistHardState(_)) {
+                effects.push(effect.clone());
+            }
+        }
         effects.push(Effect::RoleChanged {
             role_name: "Leader",
             term: self.hard.current_term,
         });
         self.send_append_entries(effects);
-        self.heartbeat_due_ms = self.now_ms + HEARTBEAT_MS;
+        self.heartbeat_due_ms = self.now_ms.saturating_add(HEARTBEAT_MS);
+        effects.extend(
+            committed
+                .into_iter()
+                .filter(|effect| !matches!(effect, Effect::PersistHardState(_))),
+        );
     }
 }
 
@@ -197,6 +363,7 @@ mod tests {
 
     fn hard(voted_for: Option<NodeId>) -> HardState {
         HardState {
+            membership: None,
             current_term: 5,
             voted_for,
         }

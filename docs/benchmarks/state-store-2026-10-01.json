@@ -1,0 +1,1454 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-01",
+  "scope": "engine-only closed loop with one outstanding JSONL request; synchronous durability",
+  "platform": "Windows / NTFS / Intel Core Ultra 7 155H / approximately 16 GiB system RAM",
+  "source_archive_sha256": "ce49e27a3835992bcc972d9427c8542e40864e70b2ee3d3f9a1cc6d56556ed46",
+  "source_files": [
+    {
+      "path": "Cargo.lock",
+      "bytes": 24201,
+      "sha256": "ef30b88c727831e35f5578e0dd105903bbb47eff39c5b44c6fd6ec0cb834b543"
+    },
+    {
+      "path": "Cargo.toml",
+      "bytes": 354,
+      "sha256": "0ed056439e1e62b1fa11a89c624e4b2501da2c633ee9c78a9dcb7041bae87b74"
+    },
+    {
+      "path": "crates/state-store/Cargo.toml",
+      "bytes": 319,
+      "sha256": "3393f0254abb786a97b7213a59ad1541f23e33e5e971715dc53f3af3611a6140"
+    },
+    {
+      "path": "crates/state-store/README.md",
+      "bytes": 8115,
+      "sha256": "e5424995b0ae6d10e06988db9a55aff7bc0123b87bd50261224688ffa9150505"
+    },
+    {
+      "path": "crates/state-store/src/bin/state-worker.rs",
+      "bytes": 6797,
+      "sha256": "62156f662314e5a8a5a361d341defaf3ada020f6d85a118706c0565c8fea2c63"
+    },
+    {
+      "path": "crates/state-store/src/bloom.rs",
+      "bytes": 2671,
+      "sha256": "8da9dec1fce06c03041ecb9736693896f8385946732135bc3d3d14e0b5e5e791"
+    },
+    {
+      "path": "crates/state-store/src/codec.rs",
+      "bytes": 5703,
+      "sha256": "0224bd2e83e18e2701b767b7026fd9e1fad949f05002948de299dc98512dbbe6"
+    },
+    {
+      "path": "crates/state-store/src/durable.rs",
+      "bytes": 5684,
+      "sha256": "006f2cae458c1ca999964db7e6bb29d975adc74077ba845d40f324eba39cf029"
+    },
+    {
+      "path": "crates/state-store/src/lib.rs",
+      "bytes": 5526,
+      "sha256": "d321148de7eb6426370ae0c4653413ee32973955c03b0c3ed26859763f698ae5"
+    },
+    {
+      "path": "crates/state-store/src/lsm.rs",
+      "bytes": 25350,
+      "sha256": "8731b0f74550d6d5d32b90b955bf0bd8431c3658645b940141ed28d1dc221bd4"
+    },
+    {
+      "path": "crates/state-store/src/merge.rs",
+      "bytes": 3944,
+      "sha256": "503248cb5dda6d0d66bbe3fcd8532691ba7ec37d3613a4e07a96e295b6b2cf4f"
+    },
+    {
+      "path": "crates/state-store/src/redb_store.rs",
+      "bytes": 10817,
+      "sha256": "7a2103bfcb281443577b845003ad5f3e97831f155aa949ad514f07672bb06bd4"
+    },
+    {
+      "path": "crates/state-store/src/table.rs",
+      "bytes": 11532,
+      "sha256": "5e49d60cf10a442b3335cc1389b23f3f1c163af9d5a865540761729deab89443"
+    },
+    {
+      "path": "crates/state-store/tests/directory_identity.rs",
+      "bytes": 3690,
+      "sha256": "c38d556ec1343ad9f6b9bfded35c007da81982dd9c526180592acdcffe6a772d"
+    },
+    {
+      "path": "crates/state-store/tests/recovery.rs",
+      "bytes": 17180,
+      "sha256": "84c44150ee46fc87c6bda182d1817f636dc19be3fd205b88f25a2b01c88fd8c5"
+    },
+    {
+      "path": "crates/state-store/tests/worker.rs",
+      "bytes": 4632,
+      "sha256": "ec9221cbd686e6adf0149b467206ed657f87684afc22b0f3c43f4bddd10f4ac1"
+    },
+    {
+      "path": "scripts/engine_benchmark.py",
+      "bytes": 12917,
+      "sha256": "5186115a7363050188919478340ca4ce78d185224577005a0103f7535ab26605"
+    }
+  ],
+  "parameters": {
+    "pairs": 4,
+    "operations_per_run": 1200,
+    "seeds": [
+      20261001,
+      20261002,
+      20261003,
+      20261004
+    ],
+    "keys": 128,
+    "value_bytes": 256,
+    "operation_mix": "seeded draws: 20% reads, 20% deletes, 60% puts; each mutation includes a synthetic retry cell",
+    "lsm_memtable_bytes": 16384,
+    "lsm_table_bytes": 8192,
+    "lsm_level1_bytes": 65536,
+    "redb_cache_bytes": 8388608
+  },
+  "order": [
+    "lsm",
+    "redb",
+    "redb",
+    "lsm",
+    "lsm",
+    "redb",
+    "redb",
+    "lsm"
+  ],
+  "both_revisions_total_operations": 19200,
+  "byte_definition": "Successful engine-issued writes, not physical-device writes. Workload delta excludes setup; finalization and setup are separate.",
+  "latency_definition": "Observer latency includes JSONL IPC and synchronous maintenance. Rate additionally includes recording overhead. No coordinated-omission correction.",
+  "runs": [
+    {
+      "revision": "r1",
+      "pair": 0,
+      "engine": "lsm",
+      "operations": 1200,
+      "mutations": 951,
+      "outcomes": {
+        "ok": 1103,
+        "absent": 97
+      },
+      "operations_per_second": 77.24695110629125,
+      "observer_latency_ms": {
+        "p50": 15.8553,
+        "p95": 23.8877,
+        "p99": 26.9478
+      },
+      "max_observer_latency_ms": 34.6,
+      "maintenance_observer_latency_ms": {
+        "count": 834,
+        "min": 10.911,
+        "median": 17.6789,
+        "max": 34.6
+      },
+      "logical_bytes": 319787,
+      "workload_issued_bytes": 30905677,
+      "workload_write_amplification": 96.64456966668439,
+      "through_finalization_issued_bytes": 30905677,
+      "through_finalization_write_amplification": 96.64456966668439,
+      "workload_bytes_by_component": {
+        "wal_bytes": 441515,
+        "flush_table_bytes": 664274,
+        "compaction_bytes": 25964996,
+        "metadata_bytes": 3834892,
+        "redb_write_bytes": 0
+      },
+      "content_syncs": 8341,
+      "directory_syncs": 5010,
+      "compactions": 834,
+      "compaction_input_bytes": 26574818,
+      "bloom": {
+        "probes": 887,
+        "positive": 177,
+        "false_positive": 0,
+        "known_negative_probes": 710,
+        "false_positive_rate": 0.0
+      },
+      "disk_bytes_workload_end": 56619,
+      "disk_bytes_final": 56619,
+      "levels_workload_end": [
+        6,
+        6,
+        0
+      ],
+      "pending_workload_end": true,
+      "pending_final": true,
+      "setup_statistics": {
+        "bloom_false_positive": 0,
+        "bloom_positive": 0,
+        "bloom_probes": 0,
+        "commits": 0,
+        "compaction_bytes": 0,
+        "compaction_input_bytes": 0,
+        "compactions": 0,
+        "content_syncs": 3,
+        "directory_syncs": 6,
+        "disk_bytes": 260,
+        "flush_table_bytes": 0,
+        "logical_bytes": 0,
+        "metadata_bytes": 260,
+        "pending_compaction": false,
+        "point_read_block_bytes": 0,
+        "redb_write_bytes": 0,
+        "tables_per_level": [
+          0,
+          0,
+          0
+        ],
+        "wal_bytes": 0
+      },
+      "samples_sha256": "81612a59a472041df7b912acfa35e6d7176c51635aa807c0e7f80e9fa8450248",
+      "workload_sha256": "c3c6bda71b7243c0a969ebfcc8136322007be6fced0c25d352b59a8c1e10ca3b",
+      "worker_sha256": "a8cfa5ce5bcc5f0b16d35121c5a9e28ce15d7cc9a95efacd4036658cb4b5809d"
+    },
+    {
+      "revision": "r1",
+      "pair": 0,
+      "engine": "redb",
+      "operations": 1200,
+      "mutations": 951,
+      "outcomes": {
+        "ok": 1103,
+        "absent": 97
+      },
+      "operations_per_second": 938.0990641992785,
+      "observer_latency_ms": {
+        "p50": 1.0328,
+        "p95": 1.7695,
+        "p99": 2.1106
+      },
+      "max_observer_latency_ms": 2.7068,
+      "maintenance_observer_latency_ms": {
+        "count": 0,
+        "min": null,
+        "median": null,
+        "max": null
+      },
+      "logical_bytes": 319787,
+      "workload_issued_bytes": 31122624,
+      "workload_write_amplification": 97.32298060896784,
+      "through_finalization_issued_bytes": 31122624,
+      "through_finalization_write_amplification": 97.32298060896784,
+      "workload_bytes_by_component": {
+        "wal_bytes": 0,
+        "flush_table_bytes": 0,
+        "compaction_bytes": 0,
+        "metadata_bytes": 0,
+        "redb_write_bytes": 31122624
+      },
+      "content_syncs": 952,
+      "directory_syncs": 0,
+      "compactions": 0,
+      "compaction_input_bytes": 0,
+      "bloom": {
+        "probes": 0,
+        "positive": 0,
+        "false_positive": 0,
+        "known_negative_probes": 0,
+        "false_positive_rate": null
+      },
+      "disk_bytes_workload_end": 196653,
+      "disk_bytes_final": 196653,
+      "levels_workload_end": [
+        0,
+        0,
+        0
+      ],
+      "pending_workload_end": false,
+      "pending_final": false,
+      "setup_statistics": {
+        "bloom_false_positive": 0,
+        "bloom_positive": 0,
+        "bloom_probes": 0,
+        "commits": 0,
+        "compaction_bytes": 0,
+        "compaction_input_bytes": 0,
+        "compactions": 0,
+        "content_syncs": 8,
+        "directory_syncs": 5,
+        "disk_bytes": 1056813,
+        "flush_table_bytes": 0,
+        "logical_bytes": 0,
+        "metadata_bytes": 45,
+        "pending_compaction": false,
+        "point_read_block_bytes": 0,
+        "redb_write_bytes": 14528,
+        "tables_per_level": [
+          0,
+          0,
+          0
+        ],
+        "wal_bytes": 0
+      },
+      "samples_sha256": "eb7ecda541ddd1384cc43b70a64589bd009824623da079c0ebf908c81a3781f4",
+      "workload_sha256": "c3c6bda71b7243c0a969ebfcc8136322007be6fced0c25d352b59a8c1e10ca3b",
+      "worker_sha256": "a8cfa5ce5bcc5f0b16d35121c5a9e28ce15d7cc9a95efacd4036658cb4b5809d"
+    },
+    {
+      "revision": "r1",
+      "pair": 1,
+      "engine": "redb",
+      "operations": 1200,
+      "mutations": 948,
+      "outcomes": {
+        "ok": 1124,
+        "absent": 76
+      },
+      "operations_per_second": 1067.6829109876317,
+      "observer_latency_ms": {
+        "p50": 0.917,
+        "p95": 1.496,
+        "p99": 1.878
+      },
+      "max_observer_latency_ms": 4.1271,
+      "maintenance_observer_latency_ms": {
+        "count": 0,
+        "min": null,
+        "median": null,
+        "max": null
+      },
+      "logical_bytes": 317050,
+      "workload_issued_bytes": 30986496,
+      "workload_write_amplification": 97.73378331493456,
+      "through_finalization_issued_bytes": 30986496,
+      "through_finalization_write_amplification": 97.73378331493456,
+      "workload_bytes_by_component": {
+        "wal_bytes": 0,
+        "flush_table_bytes": 0,
+        "compaction_bytes": 0,
+        "metadata_bytes": 0,
+        "redb_write_bytes": 30986496
+      },
+      "content_syncs": 949,
+      "directory_syncs": 0,
+      "compactions": 0,
+      "compaction_input_bytes": 0,
+      "bloom": {
+        "probes": 0,
+        "positive": 0,
+        "false_positive": 0,
+        "known_negative_probes": 0,
+        "false_positive_rate": null
+      },
+      "disk_bytes_workload_end": 196653,
+      "disk_bytes_final": 196653,
+      "levels_workload_end": [
+        0,
+        0,
+        0
+      ],
+      "pending_workload_end": false,
+      "pending_final": false,
+      "setup_statistics": {
+        "bloom_false_positive": 0,
+        "bloom_positive": 0,
+        "bloom_probes": 0,
+        "commits": 0,
+        "compaction_bytes": 0,
+        "compaction_input_bytes": 0,
+        "compactions": 0,
+        "content_syncs": 8,
+        "directory_syncs": 5,
+        "disk_bytes": 1056813,
+        "flush_table_bytes": 0,
+        "logical_bytes": 0,
+        "metadata_bytes": 45,
+        "pending_compaction": false,
+        "point_read_block_bytes": 0,
+        "redb_write_bytes": 14528,
+        "tables_per_level": [
+          0,
+          0,
+          0
+        ],
+        "wal_bytes": 0
+      },
+      "samples_sha256": "814b8d23a530e71e36b2f3489ce95d0ebb0bbc1c03e3733f2baa48ac42134e05",
+      "workload_sha256": "a5af39ffb870081038f55f508d108b539b47828557f04030bccb68d59161a663",
+      "worker_sha256": "a8cfa5ce5bcc5f0b16d35121c5a9e28ce15d7cc9a95efacd4036658cb4b5809d"
+    },
+    {
+      "revision": "r1",
+      "pair": 1,
+      "engine": "lsm",
+      "operations": 1200,
+      "mutations": 948,
+      "outcomes": {
+        "ok": 1124,
+        "absent": 76
+      },
+      "operations_per_second": 76.11086519197256,
+      "observer_latency_ms": {
+        "p50": 16.4337,
+        "p95": 23.026,
+        "p99": 25.9528
+      },
+      "max_observer_latency_ms": 29.2247,
+      "maintenance_observer_latency_ms": {
+        "count": 843,
+        "min": 10.5503,
+        "median": 18.1797,
+        "max": 29.2247
+      },
+      "logical_bytes": 317050,
+      "workload_issued_bytes": 31301690,
+      "workload_write_amplification": 98.72792934868318,
+      "through_finalization_issued_bytes": 31301690,
+      "through_finalization_write_amplification": 98.72792934868318,
+      "workload_bytes_by_component": {
+        "wal_bytes": 438394,
+        "flush_table_bytes": 668256,
+        "compaction_bytes": 26286756,
+        "metadata_bytes": 3908284,
+        "redb_write_bytes": 0
+      },
+      "content_syncs": 8410,
+      "directory_syncs": 5064,
+      "compactions": 843,
+      "compaction_input_bytes": 26899404,
+      "bloom": {
+        "probes": 905,
+        "positive": 199,
+        "false_positive": 1,
+        "known_negative_probes": 707,
+        "false_positive_rate": 0.0014144271570014145
+      },
+      "disk_bytes_workload_end": 58076,
+      "disk_bytes_final": 58076,
+      "levels_workload_end": [
+        6,
+        8,
+        0
+      ],
+      "pending_workload_end": true,
+      "pending_final": true,
+      "setup_statistics": {
+        "bloom_false_positive": 0,
+        "bloom_positive": 0,
+        "bloom_probes": 0,
+        "commits": 0,
+        "compaction_bytes": 0,
+        "compaction_input_bytes": 0,
+        "compactions": 0,
+        "content_syncs": 3,
+        "directory_syncs": 6,
+        "disk_bytes": 260,
+        "flush_table_bytes": 0,
+        "logical_bytes": 0,
+        "metadata_bytes": 260,
+        "pending_compaction": false,
+        "point_read_block_bytes": 0,
+        "redb_write_bytes": 0,
+        "tables_per_level": [
+          0,
+          0,
+          0
+        ],
+        "wal_bytes": 0
+      },
+      "samples_sha256": "a7b2255850245cd4235865d6db939a1c7945ff5859369e84cadb7c40c9dbb0e1",
+      "workload_sha256": "a5af39ffb870081038f55f508d108b539b47828557f04030bccb68d59161a663",
+      "worker_sha256": "a8cfa5ce5bcc5f0b16d35121c5a9e28ce15d7cc9a95efacd4036658cb4b5809d"
+    },
+    {
+      "revision": "r1",
+      "pair": 2,
+      "engine": "lsm",
+      "operations": 1200,
+      "mutations": 963,
+      "outcomes": {
+        "ok": 1115,
+        "absent": 85
+      },
+      "operations_per_second": 78.99686099389768,
+      "observer_latency_ms": {
+        "p50": 15.6495,
+        "p95": 22.3727,
+        "p99": 24.9967
+      },
+      "max_observer_latency_ms": 31.2955,
+      "maintenance_observer_latency_ms": {
+        "count": 859,
+        "min": 10.384,
+        "median": 16.9394,
+        "max": 31.2955
+      },
+      "logical_bytes": 325090,
+      "workload_issued_bytes": 31956629,
+      "workload_write_amplification": 98.30086745209019,
+      "through_finalization_issued_bytes": 31956629,
+      "through_finalization_write_amplification": 98.30086745209019,
+      "workload_bytes_by_component": {
+        "wal_bytes": 448354,
+        "flush_table_bytes": 683285,
+        "compaction_bytes": 26967765,
+        "metadata_bytes": 3857225,
+        "redb_write_bytes": 0
+      },
+      "content_syncs": 8605,
+      "directory_syncs": 5160,
+      "compactions": 859,
+      "compaction_input_bytes": 27596878,
+      "bloom": {
+        "probes": 814,
+        "positive": 174,
+        "false_positive": 2,
+        "known_negative_probes": 642,
+        "false_positive_rate": 0.003115264797507788
+      },
+      "disk_bytes_workload_end": 56493,
+      "disk_bytes_final": 56493,
+      "levels_workload_end": [
+        6,
+        7,
+        0
+      ],
+      "pending_workload_end": true,
+      "pending_final": true,
+      "setup_statistics": {
+        "bloom_false_positive": 0,
+        "bloom_positive": 0,
+        "bloom_probes": 0,
+        "commits": 0,
+        "compaction_bytes": 0,
+        "compaction_input_bytes": 0,
+        "compactions": 0,
+        "content_syncs": 3,
+        "directory_syncs": 6,
+        "disk_bytes": 260,
+        "flush_table_bytes": 0,
+        "logical_bytes": 0,
+        "metadata_bytes": 260,
+        "pending_compaction": false,
+        "point_read_block_bytes": 0,
+        "redb_write_bytes": 0,
+        "tables_per_level": [
+          0,
+          0,
+          0
+        ],
+        "wal_bytes": 0
+      },
+      "samples_sha256": "c918c3cf7acdde166d2f1fda92e541eb5ed3178ef21fbf3b8e61ee2d7475bdc4",
+      "workload_sha256": "bb6a6efbda0f23a7bebe11d9ed995d1be5ca3552bafddbaebb522983e0849510",
+      "worker_sha256": "a8cfa5ce5bcc5f0b16d35121c5a9e28ce15d7cc9a95efacd4036658cb4b5809d"
+    },
+    {
+      "revision": "r1",
+      "pair": 2,
+      "engine": "redb",
+      "operations": 1200,
+      "mutations": 963,
+      "outcomes": {
+        "ok": 1115,
+        "absent": 85
+      },
+      "operations_per_second": 1139.8886556761136,
+      "observer_latency_ms": {
+        "p50": 0.8201,
+        "p95": 1.4787,
+        "p99": 1.8161
+      },
+      "max_observer_latency_ms": 5.4403,
+      "maintenance_observer_latency_ms": {
+        "count": 0,
+        "min": null,
+        "median": null,
+        "max": null
+      },
+      "logical_bytes": 325090,
+      "workload_issued_bytes": 31531968,
+      "workload_write_amplification": 96.99457996247193,
+      "through_finalization_issued_bytes": 31531968,
+      "through_finalization_write_amplification": 96.99457996247193,
+      "workload_bytes_by_component": {
+        "wal_bytes": 0,
+        "flush_table_bytes": 0,
+        "compaction_bytes": 0,
+        "metadata_bytes": 0,
+        "redb_write_bytes": 31531968
+      },
+      "content_syncs": 964,
+      "directory_syncs": 0,
+      "compactions": 0,
+      "compaction_input_bytes": 0,
+      "bloom": {
+        "probes": 0,
+        "positive": 0,
+        "false_positive": 0,
+        "known_negative_probes": 0,
+        "false_positive_rate": null
+      },
+      "disk_bytes_workload_end": 196653,
+      "disk_bytes_final": 196653,
+      "levels_workload_end": [
+        0,
+        0,
+        0
+      ],
+      "pending_workload_end": false,
+      "pending_final": false,
+      "setup_statistics": {
+        "bloom_false_positive": 0,
+        "bloom_positive": 0,
+        "bloom_probes": 0,
+        "commits": 0,
+        "compaction_bytes": 0,
+        "compaction_input_bytes": 0,
+        "compactions": 0,
+        "content_syncs": 8,
+        "directory_syncs": 5,
+        "disk_bytes": 1056813,
+        "flush_table_bytes": 0,
+        "logical_bytes": 0,
+        "metadata_bytes": 45,
+        "pending_compaction": false,
+        "point_read_block_bytes": 0,
+        "redb_write_bytes": 14528,
+        "tables_per_level": [
+          0,
+          0,
+          0
+        ],
+        "wal_bytes": 0
+      },
+      "samples_sha256": "4d2f16047721a956d8be403019361eae600440568c23a34c5203e263bcfdca93",
+      "workload_sha256": "bb6a6efbda0f23a7bebe11d9ed995d1be5ca3552bafddbaebb522983e0849510",
+      "worker_sha256": "a8cfa5ce5bcc5f0b16d35121c5a9e28ce15d7cc9a95efacd4036658cb4b5809d"
+    },
+    {
+      "revision": "r1",
+      "pair": 3,
+      "engine": "redb",
+      "operations": 1200,
+      "mutations": 950,
+      "outcomes": {
+        "absent": 77,
+        "ok": 1123
+      },
+      "operations_per_second": 1039.9612926406878,
+      "observer_latency_ms": {
+        "p50": 0.9542,
+        "p95": 1.5015,
+        "p99": 1.9032
+      },
+      "max_observer_latency_ms": 2.3104,
+      "maintenance_observer_latency_ms": {
+        "count": 0,
+        "min": null,
+        "median": null,
+        "max": null
+      },
+      "logical_bytes": 322213,
+      "workload_issued_bytes": 31118208,
+      "workload_write_amplification": 96.57651305192528,
+      "through_finalization_issued_bytes": 31118208,
+      "through_finalization_write_amplification": 96.57651305192528,
+      "workload_bytes_by_component": {
+        "wal_bytes": 0,
+        "flush_table_bytes": 0,
+        "compaction_bytes": 0,
+        "metadata_bytes": 0,
+        "redb_write_bytes": 31118208
+      },
+      "content_syncs": 951,
+      "directory_syncs": 0,
+      "compactions": 0,
+      "compaction_input_bytes": 0,
+      "bloom": {
+        "probes": 0,
+        "positive": 0,
+        "false_positive": 0,
+        "known_negative_probes": 0,
+        "false_positive_rate": null
+      },
+      "disk_bytes_workload_end": 258093,
+      "disk_bytes_final": 258093,
+      "levels_workload_end": [
+        0,
+        0,
+        0
+      ],
+      "pending_workload_end": false,
+      "pending_final": false,
+      "setup_statistics": {
+        "bloom_false_positive": 0,
+        "bloom_positive": 0,
+        "bloom_probes": 0,
+        "commits": 0,
+        "compaction_bytes": 0,
+        "compaction_input_bytes": 0,
+        "compactions": 0,
+        "content_syncs": 8,
+        "directory_syncs": 5,
+        "disk_bytes": 1056813,
+        "flush_table_bytes": 0,
+        "logical_bytes": 0,
+        "metadata_bytes": 45,
+        "pending_compaction": false,
+        "point_read_block_bytes": 0,
+        "redb_write_bytes": 14528,
+        "tables_per_level": [
+          0,
+          0,
+          0
+        ],
+        "wal_bytes": 0
+      },
+      "samples_sha256": "f5069ba6ce7af91edc662318a089f8cbc32fe919165367148f04cd24ac23ab47",
+      "workload_sha256": "14428a76b1d949148a48039ac920619adebc99d68309916a554cd3e6549e0522",
+      "worker_sha256": "a8cfa5ce5bcc5f0b16d35121c5a9e28ce15d7cc9a95efacd4036658cb4b5809d"
+    },
+    {
+      "revision": "r1",
+      "pair": 3,
+      "engine": "lsm",
+      "operations": 1200,
+      "mutations": 950,
+      "outcomes": {
+        "absent": 77,
+        "ok": 1123
+      },
+      "operations_per_second": 75.96779023935824,
+      "observer_latency_ms": {
+        "p50": 16.5975,
+        "p95": 22.7076,
+        "p99": 24.7498
+      },
+      "max_observer_latency_ms": 29.3901,
+      "maintenance_observer_latency_ms": {
+        "count": 842,
+        "min": 11.3533,
+        "median": 18.2377,
+        "max": 29.3901
+      },
+      "logical_bytes": 322213,
+      "workload_issued_bytes": 31236740,
+      "workload_write_amplification": 96.94438151160878,
+      "through_finalization_issued_bytes": 31236740,
+      "through_finalization_write_amplification": 96.94438151160878,
+      "workload_bytes_by_component": {
+        "wal_bytes": 443813,
+        "flush_table_bytes": 670994,
+        "compaction_bytes": 26252828,
+        "metadata_bytes": 3869105,
+        "redb_write_bytes": 0
+      },
+      "content_syncs": 8410,
+      "directory_syncs": 5058,
+      "compactions": 842,
+      "compaction_input_bytes": 26869202,
+      "bloom": {
+        "probes": 1001,
+        "positive": 191,
+        "false_positive": 1,
+        "known_negative_probes": 811,
+        "false_positive_rate": 0.0012330456226880395
+      },
+      "disk_bytes_workload_end": 56780,
+      "disk_bytes_final": 56780,
+      "levels_workload_end": [
+        6,
+        6,
+        0
+      ],
+      "pending_workload_end": true,
+      "pending_final": true,
+      "setup_statistics": {
+        "bloom_false_positive": 0,
+        "bloom_positive": 0,
+        "bloom_probes": 0,
+        "commits": 0,
+        "compaction_bytes": 0,
+        "compaction_input_bytes": 0,
+        "compactions": 0,
+        "content_syncs": 3,
+        "directory_syncs": 6,
+        "disk_bytes": 260,
+        "flush_table_bytes": 0,
+        "logical_bytes": 0,
+        "metadata_bytes": 260,
+        "pending_compaction": false,
+        "point_read_block_bytes": 0,
+        "redb_write_bytes": 0,
+        "tables_per_level": [
+          0,
+          0,
+          0
+        ],
+        "wal_bytes": 0
+      },
+      "samples_sha256": "4dfbf2251cb1c15abdce116d1978e88ef0c5d3c88122be3a35f25a414060bcda",
+      "workload_sha256": "14428a76b1d949148a48039ac920619adebc99d68309916a554cd3e6549e0522",
+      "worker_sha256": "a8cfa5ce5bcc5f0b16d35121c5a9e28ce15d7cc9a95efacd4036658cb4b5809d"
+    },
+    {
+      "revision": "r2",
+      "pair": 0,
+      "engine": "lsm",
+      "operations": 1200,
+      "mutations": 951,
+      "outcomes": {
+        "ok": 1103,
+        "absent": 97
+      },
+      "operations_per_second": 1149.9451859461365,
+      "observer_latency_ms": {
+        "p50": 0.6087,
+        "p95": 0.9694,
+        "p99": 8.2489
+      },
+      "max_observer_latency_ms": 29.5474,
+      "maintenance_observer_latency_ms": {
+        "count": 8,
+        "min": 21.6421,
+        "median": 26.969050000000003,
+        "max": 29.5474
+      },
+      "logical_bytes": 319787,
+      "workload_issued_bytes": 1150728,
+      "workload_write_amplification": 3.5984201984445896,
+      "through_finalization_issued_bytes": 1168040,
+      "through_finalization_write_amplification": 3.6525562327424193,
+      "workload_bytes_by_component": {
+        "wal_bytes": 441515,
+        "flush_table_bytes": 294684,
+        "compaction_bytes": 361743,
+        "metadata_bytes": 52786,
+        "redb_write_bytes": 0
+      },
+      "content_syncs": 1116,
+      "directory_syncs": 96,
+      "compactions": 8,
+      "compaction_input_bytes": 607822,
+      "bloom": {
+        "probes": 265,
+        "positive": 158,
+        "false_positive": 1,
+        "known_negative_probes": 108,
+        "false_positive_rate": 0.009259259259259259
+      },
+      "disk_bytes_workload_end": 71304,
+      "disk_bytes_final": 65961,
+      "levels_workload_end": [
+        0,
+        6,
+        0
+      ],
+      "pending_workload_end": false,
+      "pending_final": false,
+      "setup_statistics": {
+        "bloom_false_positive": 0,
+        "bloom_positive": 0,
+        "bloom_probes": 0,
+        "commits": 0,
+        "compaction_bytes": 0,
+        "compaction_input_bytes": 0,
+        "compactions": 0,
+        "content_syncs": 3,
+        "directory_syncs": 6,
+        "disk_bytes": 260,
+        "flush_table_bytes": 0,
+        "logical_bytes": 0,
+        "metadata_bytes": 260,
+        "pending_compaction": false,
+        "point_read_block_bytes": 0,
+        "redb_write_bytes": 0,
+        "tables_per_level": [
+          0,
+          0,
+          0
+        ],
+        "wal_bytes": 0
+      },
+      "samples_sha256": "40805196030a79e3b72c8146a7634c3906437b7366bfd05afa3b3700cdc03519",
+      "workload_sha256": "c3c6bda71b7243c0a969ebfcc8136322007be6fced0c25d352b59a8c1e10ca3b",
+      "worker_sha256": "8262e5abc25f7b29d9cd00d786196d7614f0c69bbe07b44c4989502ecfc4f1ac"
+    },
+    {
+      "revision": "r2",
+      "pair": 0,
+      "engine": "redb",
+      "operations": 1200,
+      "mutations": 951,
+      "outcomes": {
+        "ok": 1103,
+        "absent": 97
+      },
+      "operations_per_second": 1026.8261761267022,
+      "observer_latency_ms": {
+        "p50": 0.9792,
+        "p95": 1.5707,
+        "p99": 2.0945
+      },
+      "max_observer_latency_ms": 2.8391,
+      "maintenance_observer_latency_ms": {
+        "count": 0,
+        "min": null,
+        "median": null,
+        "max": null
+      },
+      "logical_bytes": 319787,
+      "workload_issued_bytes": 31122624,
+      "workload_write_amplification": 97.32298060896784,
+      "through_finalization_issued_bytes": 31122624,
+      "through_finalization_write_amplification": 97.32298060896784,
+      "workload_bytes_by_component": {
+        "wal_bytes": 0,
+        "flush_table_bytes": 0,
+        "compaction_bytes": 0,
+        "metadata_bytes": 0,
+        "redb_write_bytes": 31122624
+      },
+      "content_syncs": 952,
+      "directory_syncs": 0,
+      "compactions": 0,
+      "compaction_input_bytes": 0,
+      "bloom": {
+        "probes": 0,
+        "positive": 0,
+        "false_positive": 0,
+        "known_negative_probes": 0,
+        "false_positive_rate": null
+      },
+      "disk_bytes_workload_end": 196653,
+      "disk_bytes_final": 196653,
+      "levels_workload_end": [
+        0,
+        0,
+        0
+      ],
+      "pending_workload_end": false,
+      "pending_final": false,
+      "setup_statistics": {
+        "bloom_false_positive": 0,
+        "bloom_positive": 0,
+        "bloom_probes": 0,
+        "commits": 0,
+        "compaction_bytes": 0,
+        "compaction_input_bytes": 0,
+        "compactions": 0,
+        "content_syncs": 8,
+        "directory_syncs": 5,
+        "disk_bytes": 1056813,
+        "flush_table_bytes": 0,
+        "logical_bytes": 0,
+        "metadata_bytes": 45,
+        "pending_compaction": false,
+        "point_read_block_bytes": 0,
+        "redb_write_bytes": 14528,
+        "tables_per_level": [
+          0,
+          0,
+          0
+        ],
+        "wal_bytes": 0
+      },
+      "samples_sha256": "a6ba4af1e389232cf6a82d7bc066d92b53bdf8e165479301b9ecf4c9286cdf07",
+      "workload_sha256": "c3c6bda71b7243c0a969ebfcc8136322007be6fced0c25d352b59a8c1e10ca3b",
+      "worker_sha256": "8262e5abc25f7b29d9cd00d786196d7614f0c69bbe07b44c4989502ecfc4f1ac"
+    },
+    {
+      "revision": "r2",
+      "pair": 1,
+      "engine": "redb",
+      "operations": 1200,
+      "mutations": 948,
+      "outcomes": {
+        "ok": 1124,
+        "absent": 76
+      },
+      "operations_per_second": 946.6878272433563,
+      "observer_latency_ms": {
+        "p50": 1.0207,
+        "p95": 1.7949,
+        "p99": 2.3542
+      },
+      "max_observer_latency_ms": 3.1235,
+      "maintenance_observer_latency_ms": {
+        "count": 0,
+        "min": null,
+        "median": null,
+        "max": null
+      },
+      "logical_bytes": 317050,
+      "workload_issued_bytes": 30986496,
+      "workload_write_amplification": 97.73378331493456,
+      "through_finalization_issued_bytes": 30986496,
+      "through_finalization_write_amplification": 97.73378331493456,
+      "workload_bytes_by_component": {
+        "wal_bytes": 0,
+        "flush_table_bytes": 0,
+        "compaction_bytes": 0,
+        "metadata_bytes": 0,
+        "redb_write_bytes": 30986496
+      },
+      "content_syncs": 949,
+      "directory_syncs": 0,
+      "compactions": 0,
+      "compaction_input_bytes": 0,
+      "bloom": {
+        "probes": 0,
+        "positive": 0,
+        "false_positive": 0,
+        "known_negative_probes": 0,
+        "false_positive_rate": null
+      },
+      "disk_bytes_workload_end": 196653,
+      "disk_bytes_final": 196653,
+      "levels_workload_end": [
+        0,
+        0,
+        0
+      ],
+      "pending_workload_end": false,
+      "pending_final": false,
+      "setup_statistics": {
+        "bloom_false_positive": 0,
+        "bloom_positive": 0,
+        "bloom_probes": 0,
+        "commits": 0,
+        "compaction_bytes": 0,
+        "compaction_input_bytes": 0,
+        "compactions": 0,
+        "content_syncs": 8,
+        "directory_syncs": 5,
+        "disk_bytes": 1056813,
+        "flush_table_bytes": 0,
+        "logical_bytes": 0,
+        "metadata_bytes": 45,
+        "pending_compaction": false,
+        "point_read_block_bytes": 0,
+        "redb_write_bytes": 14528,
+        "tables_per_level": [
+          0,
+          0,
+          0
+        ],
+        "wal_bytes": 0
+      },
+      "samples_sha256": "516e6dab2a9583c239a86f9bbdf2c6e91c2037a73e44158b0021e8c473f04a5e",
+      "workload_sha256": "a5af39ffb870081038f55f508d108b539b47828557f04030bccb68d59161a663",
+      "worker_sha256": "8262e5abc25f7b29d9cd00d786196d7614f0c69bbe07b44c4989502ecfc4f1ac"
+    },
+    {
+      "revision": "r2",
+      "pair": 1,
+      "engine": "lsm",
+      "operations": 1200,
+      "mutations": 948,
+      "outcomes": {
+        "ok": 1124,
+        "absent": 76
+      },
+      "operations_per_second": 1109.915177507347,
+      "observer_latency_ms": {
+        "p50": 0.6069,
+        "p95": 1.0395,
+        "p99": 8.4456
+      },
+      "max_observer_latency_ms": 30.7954,
+      "maintenance_observer_latency_ms": {
+        "count": 8,
+        "min": 22.9254,
+        "median": 25.49035,
+        "max": 30.7954
+      },
+      "logical_bytes": 317050,
+      "workload_issued_bytes": 1171927,
+      "workload_write_amplification": 3.6963475792461757,
+      "through_finalization_issued_bytes": 1180350,
+      "through_finalization_write_amplification": 3.7229143668191136,
+      "workload_bytes_by_component": {
+        "wal_bytes": 438394,
+        "flush_table_bytes": 311819,
+        "compaction_bytes": 367905,
+        "metadata_bytes": 53809,
+        "redb_write_bytes": 0
+      },
+      "content_syncs": 1117,
+      "directory_syncs": 99,
+      "compactions": 8,
+      "compaction_input_bytes": 610157,
+      "bloom": {
+        "probes": 279,
+        "positive": 164,
+        "false_positive": 0,
+        "known_negative_probes": 115,
+        "false_positive_rate": 0.0
+      },
+      "disk_bytes_workload_end": 79531,
+      "disk_bytes_final": 78034,
+      "levels_workload_end": [
+        3,
+        6,
+        0
+      ],
+      "pending_workload_end": false,
+      "pending_final": true,
+      "setup_statistics": {
+        "bloom_false_positive": 0,
+        "bloom_positive": 0,
+        "bloom_probes": 0,
+        "commits": 0,
+        "compaction_bytes": 0,
+        "compaction_input_bytes": 0,
+        "compactions": 0,
+        "content_syncs": 3,
+        "directory_syncs": 6,
+        "disk_bytes": 260,
+        "flush_table_bytes": 0,
+        "logical_bytes": 0,
+        "metadata_bytes": 260,
+        "pending_compaction": false,
+        "point_read_block_bytes": 0,
+        "redb_write_bytes": 0,
+        "tables_per_level": [
+          0,
+          0,
+          0
+        ],
+        "wal_bytes": 0
+      },
+      "samples_sha256": "86d7a8b2d42d05dd908d7c7fdaf62dd92cb711755af1bdcfcf133a1d31f13de5",
+      "workload_sha256": "a5af39ffb870081038f55f508d108b539b47828557f04030bccb68d59161a663",
+      "worker_sha256": "8262e5abc25f7b29d9cd00d786196d7614f0c69bbe07b44c4989502ecfc4f1ac"
+    },
+    {
+      "revision": "r2",
+      "pair": 2,
+      "engine": "lsm",
+      "operations": 1200,
+      "mutations": 963,
+      "outcomes": {
+        "ok": 1115,
+        "absent": 85
+      },
+      "operations_per_second": 1157.239201439374,
+      "observer_latency_ms": {
+        "p50": 0.5878,
+        "p95": 0.9766,
+        "p99": 8.0126
+      },
+      "max_observer_latency_ms": 32.2804,
+      "maintenance_observer_latency_ms": {
+        "count": 8,
+        "min": 21.0983,
+        "median": 26.2469,
+        "max": 32.2804
+      },
+      "logical_bytes": 325090,
+      "workload_issued_bytes": 1176817,
+      "workload_write_amplification": 3.619972930573072,
+      "through_finalization_issued_bytes": 1184209,
+      "through_finalization_write_amplification": 3.6427112491925313,
+      "workload_bytes_by_component": {
+        "wal_bytes": 448354,
+        "flush_table_bytes": 313813,
+        "compaction_bytes": 360224,
+        "metadata_bytes": 54426,
+        "redb_write_bytes": 0
+      },
+      "content_syncs": 1133,
+      "directory_syncs": 99,
+      "compactions": 8,
+      "compaction_input_bytes": 606290,
+      "bloom": {
+        "probes": 227,
+        "positive": 133,
+        "false_positive": 0,
+        "known_negative_probes": 94,
+        "false_positive_rate": 0.0
+      },
+      "disk_bytes_workload_end": 75793,
+      "disk_bytes_final": 75183,
+      "levels_workload_end": [
+        3,
+        6,
+        0
+      ],
+      "pending_workload_end": false,
+      "pending_final": true,
+      "setup_statistics": {
+        "bloom_false_positive": 0,
+        "bloom_positive": 0,
+        "bloom_probes": 0,
+        "commits": 0,
+        "compaction_bytes": 0,
+        "compaction_input_bytes": 0,
+        "compactions": 0,
+        "content_syncs": 3,
+        "directory_syncs": 6,
+        "disk_bytes": 260,
+        "flush_table_bytes": 0,
+        "logical_bytes": 0,
+        "metadata_bytes": 260,
+        "pending_compaction": false,
+        "point_read_block_bytes": 0,
+        "redb_write_bytes": 0,
+        "tables_per_level": [
+          0,
+          0,
+          0
+        ],
+        "wal_bytes": 0
+      },
+      "samples_sha256": "b780737ea3975bcb48850160ead4d9cd409583b2eea4109a08599be6a3c4714b",
+      "workload_sha256": "bb6a6efbda0f23a7bebe11d9ed995d1be5ca3552bafddbaebb522983e0849510",
+      "worker_sha256": "8262e5abc25f7b29d9cd00d786196d7614f0c69bbe07b44c4989502ecfc4f1ac"
+    },
+    {
+      "revision": "r2",
+      "pair": 2,
+      "engine": "redb",
+      "operations": 1200,
+      "mutations": 963,
+      "outcomes": {
+        "ok": 1115,
+        "absent": 85
+      },
+      "operations_per_second": 905.1389490114865,
+      "observer_latency_ms": {
+        "p50": 1.051,
+        "p95": 1.8535,
+        "p99": 2.177
+      },
+      "max_observer_latency_ms": 2.6758,
+      "maintenance_observer_latency_ms": {
+        "count": 0,
+        "min": null,
+        "median": null,
+        "max": null
+      },
+      "logical_bytes": 325090,
+      "workload_issued_bytes": 31531968,
+      "workload_write_amplification": 96.99457996247193,
+      "through_finalization_issued_bytes": 31531968,
+      "through_finalization_write_amplification": 96.99457996247193,
+      "workload_bytes_by_component": {
+        "wal_bytes": 0,
+        "flush_table_bytes": 0,
+        "compaction_bytes": 0,
+        "metadata_bytes": 0,
+        "redb_write_bytes": 31531968
+      },
+      "content_syncs": 964,
+      "directory_syncs": 0,
+      "compactions": 0,
+      "compaction_input_bytes": 0,
+      "bloom": {
+        "probes": 0,
+        "positive": 0,
+        "false_positive": 0,
+        "known_negative_probes": 0,
+        "false_positive_rate": null
+      },
+      "disk_bytes_workload_end": 196653,
+      "disk_bytes_final": 196653,
+      "levels_workload_end": [
+        0,
+        0,
+        0
+      ],
+      "pending_workload_end": false,
+      "pending_final": false,
+      "setup_statistics": {
+        "bloom_false_positive": 0,
+        "bloom_positive": 0,
+        "bloom_probes": 0,
+        "commits": 0,
+        "compaction_bytes": 0,
+        "compaction_input_bytes": 0,
+        "compactions": 0,
+        "content_syncs": 8,
+        "directory_syncs": 5,
+        "disk_bytes": 1056813,
+        "flush_table_bytes": 0,
+        "logical_bytes": 0,
+        "metadata_bytes": 45,
+        "pending_compaction": false,
+        "point_read_block_bytes": 0,
+        "redb_write_bytes": 14528,
+        "tables_per_level": [
+          0,
+          0,
+          0
+        ],
+        "wal_bytes": 0
+      },
+      "samples_sha256": "7261bb8584c00c64c6b028ce5994ca836e4d7267f901adac0ac7f1af96425cc0",
+      "workload_sha256": "bb6a6efbda0f23a7bebe11d9ed995d1be5ca3552bafddbaebb522983e0849510",
+      "worker_sha256": "8262e5abc25f7b29d9cd00d786196d7614f0c69bbe07b44c4989502ecfc4f1ac"
+    },
+    {
+      "revision": "r2",
+      "pair": 3,
+      "engine": "redb",
+      "operations": 1200,
+      "mutations": 950,
+      "outcomes": {
+        "absent": 77,
+        "ok": 1123
+      },
+      "operations_per_second": 956.7883294786724,
+      "observer_latency_ms": {
+        "p50": 1.044,
+        "p95": 1.6993,
+        "p99": 2.0314
+      },
+      "max_observer_latency_ms": 2.8598,
+      "maintenance_observer_latency_ms": {
+        "count": 0,
+        "min": null,
+        "median": null,
+        "max": null
+      },
+      "logical_bytes": 322213,
+      "workload_issued_bytes": 31118208,
+      "workload_write_amplification": 96.57651305192528,
+      "through_finalization_issued_bytes": 31118208,
+      "through_finalization_write_amplification": 96.57651305192528,
+      "workload_bytes_by_component": {
+        "wal_bytes": 0,
+        "flush_table_bytes": 0,
+        "compaction_bytes": 0,
+        "metadata_bytes": 0,
+        "redb_write_bytes": 31118208
+      },
+      "content_syncs": 951,
+      "directory_syncs": 0,
+      "compactions": 0,
+      "compaction_input_bytes": 0,
+      "bloom": {
+        "probes": 0,
+        "positive": 0,
+        "false_positive": 0,
+        "known_negative_probes": 0,
+        "false_positive_rate": null
+      },
+      "disk_bytes_workload_end": 258093,
+      "disk_bytes_final": 258093,
+      "levels_workload_end": [
+        0,
+        0,
+        0
+      ],
+      "pending_workload_end": false,
+      "pending_final": false,
+      "setup_statistics": {
+        "bloom_false_positive": 0,
+        "bloom_positive": 0,
+        "bloom_probes": 0,
+        "commits": 0,
+        "compaction_bytes": 0,
+        "compaction_input_bytes": 0,
+        "compactions": 0,
+        "content_syncs": 8,
+        "directory_syncs": 5,
+        "disk_bytes": 1056813,
+        "flush_table_bytes": 0,
+        "logical_bytes": 0,
+        "metadata_bytes": 45,
+        "pending_compaction": false,
+        "point_read_block_bytes": 0,
+        "redb_write_bytes": 14528,
+        "tables_per_level": [
+          0,
+          0,
+          0
+        ],
+        "wal_bytes": 0
+      },
+      "samples_sha256": "a3a1e5af83ec131388e270b03f33e31c330ea10f172539429e2f2628c74d9536",
+      "workload_sha256": "14428a76b1d949148a48039ac920619adebc99d68309916a554cd3e6549e0522",
+      "worker_sha256": "8262e5abc25f7b29d9cd00d786196d7614f0c69bbe07b44c4989502ecfc4f1ac"
+    },
+    {
+      "revision": "r2",
+      "pair": 3,
+      "engine": "lsm",
+      "operations": 1200,
+      "mutations": 950,
+      "outcomes": {
+        "absent": 77,
+        "ok": 1123
+      },
+      "operations_per_second": 1082.5680028623099,
+      "observer_latency_ms": {
+        "p50": 0.6331,
+        "p95": 1.0436,
+        "p99": 8.7698
+      },
+      "max_observer_latency_ms": 33.2851,
+      "maintenance_observer_latency_ms": {
+        "count": 8,
+        "min": 24.0661,
+        "median": 27.1928,
+        "max": 33.2851
+      },
+      "logical_bytes": 322213,
+      "workload_issued_bytes": 1175972,
+      "workload_write_amplification": 3.6496727320126747,
+      "through_finalization_issued_bytes": 1186298,
+      "through_finalization_write_amplification": 3.68171985612002,
+      "workload_bytes_by_component": {
+        "wal_bytes": 443813,
+        "flush_table_bytes": 313172,
+        "compaction_bytes": 364557,
+        "metadata_bytes": 54430,
+        "redb_write_bytes": 0
+      },
+      "content_syncs": 1120,
+      "directory_syncs": 99,
+      "compactions": 8,
+      "compaction_input_bytes": 610594,
+      "bloom": {
+        "probes": 283,
+        "positive": 175,
+        "false_positive": 0,
+        "known_negative_probes": 108,
+        "false_positive_rate": 0.0
+      },
+      "disk_bytes_workload_end": 78904,
+      "disk_bytes_final": 77505,
+      "levels_workload_end": [
+        3,
+        6,
+        0
+      ],
+      "pending_workload_end": false,
+      "pending_final": true,
+      "setup_statistics": {
+        "bloom_false_positive": 0,
+        "bloom_positive": 0,
+        "bloom_probes": 0,
+        "commits": 0,
+        "compaction_bytes": 0,
+        "compaction_input_bytes": 0,
+        "compactions": 0,
+        "content_syncs": 3,
+        "directory_syncs": 6,
+        "disk_bytes": 260,
+        "flush_table_bytes": 0,
+        "logical_bytes": 0,
+        "metadata_bytes": 260,
+        "pending_compaction": false,
+        "point_read_block_bytes": 0,
+        "redb_write_bytes": 0,
+        "tables_per_level": [
+          0,
+          0,
+          0
+        ],
+        "wal_bytes": 0
+      },
+      "samples_sha256": "635b42ed485acbf308f64cf67aae8d5097fbc434d2b9465b61a3a75c06ed80ba",
+      "workload_sha256": "14428a76b1d949148a48039ac920619adebc99d68309916a554cd3e6549e0522",
+      "worker_sha256": "8262e5abc25f7b29d9cd00d786196d7614f0c69bbe07b44c4989502ecfc4f1ac"
+    }
+  ]
+}

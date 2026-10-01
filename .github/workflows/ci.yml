@@ -34,8 +34,23 @@ jobs:
         run: cargo check --workspace --all-targets --all-features --locked
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Prepare isolated process-test evidence directory
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path "${{ runner.temp }}/micro-raft-tests" | Out-Null
       - name: Run debug tests
+        env:
+          TMP: ${{ runner.temp }}/micro-raft-tests
+          TEMP: ${{ runner.temp }}/micro-raft-tests
+          TMPDIR: ${{ runner.temp }}/micro-raft-tests
         run: cargo test --workspace --all-targets --all-features --locked
+      - name: Retain failed process-test evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: process-test-evidence-${{ github.job }}
+          path: ${{ runner.temp }}/micro-raft-tests
+          if-no-files-found: ignore
+          retention-days: 7
 
   release-chaos:
     name: Release-mode test suite
@@ -49,5 +64,114 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
         with:
           toolchain: 1.96.0
+      - name: Prepare isolated process-test evidence directory
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path "${{ runner.temp }}/micro-raft-tests" | Out-Null
       - name: Run full release suite, including deterministic chaos tests
+        env:
+          TMP: ${{ runner.temp }}/micro-raft-tests
+          TEMP: ${{ runner.temp }}/micro-raft-tests
+          TMPDIR: ${{ runner.temp }}/micro-raft-tests
         run: cargo test --workspace --all-targets --all-features --release --locked
+      - name: Retain failed process-test evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: process-test-evidence-${{ github.job }}
+          path: ${{ runner.temp }}/micro-raft-tests
+          if-no-files-found: ignore
+          retention-days: 7
+
+  linux:
+    name: Linux checks and container smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust 1.96.0
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          toolchain: 1.96.0
+          components: rustfmt, clippy
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Build all targets
+        run: cargo build --workspace --all-targets --all-features --locked
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Prepare isolated process-test evidence directory
+        run: mkdir -p "${{ runner.temp }}/micro-raft-tests"
+      - name: Run debug tests
+        env:
+          TMP: ${{ runner.temp }}/micro-raft-tests
+          TEMP: ${{ runner.temp }}/micro-raft-tests
+          TMPDIR: ${{ runner.temp }}/micro-raft-tests
+        run: cargo test --workspace --all-targets --all-features --locked
+      - name: Run release tests
+        env:
+          TMP: ${{ runner.temp }}/micro-raft-tests
+          TEMP: ${{ runner.temp }}/micro-raft-tests
+          TMPDIR: ${{ runner.temp }}/micro-raft-tests
+        run: cargo test --workspace --all-targets --all-features --release --locked
+      - name: Retain failed process-test evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: process-test-evidence-${{ github.job }}
+          path: ${{ runner.temp }}/micro-raft-tests
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Test experiment client and fault oracle
+        run: |
+          python3 -B -m unittest discover -s deploy/docker/client -p test_client.py -v
+          python3 -B -m unittest discover -s scripts -p "test_*.py" -v
+      - name: Run container smoke
+        run: bash scripts/compose_smoke.sh --compose deploy/docker/compose.3.yml --project micro-raft --timeout-seconds 30 --out "${{ runner.temp }}/compose-smoke"
+      - name: Retain container experiment evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: container-smoke-evidence
+          path: ${{ runner.temp }}/compose-smoke
+          if-no-files-found: warn
+          retention-days: 7
+
+  shard-integration:
+    name: Shard movement and membership
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust 1.96.0
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          toolchain: 1.96.0
+      - name: Build and seal the shard-service experiment
+        run: python3 -B scripts/seal_shard_build.py --source-root "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/shard-build" --target-dir "$RUNNER_TEMP/shard-target" --jobs 1 --timeout-seconds 900
+      - name: Verify membership and shard-handoff interaction
+        run: >-
+          python3 -B scripts/membership_handoff_experiment.py
+          --binary "$RUNNER_TEMP/shard-build/bin/shard-service"
+          --client deploy/docker/client/client.py
+          --handoff-helper scripts/handoff_experiment.py
+          --source-binding "$RUNNER_TEMP/shard-build/source-binding.json"
+          --out "$RUNNER_TEMP/membership-handoff"
+          --cases replacement_and_handoff unavailable_target_ticket
+          --seed 20261002 --case-seconds 600
+      - name: Retain shard experiment evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: shard-membership-evidence
+          path: |
+            ${{ runner.temp }}/shard-build/source-binding.json
+            ${{ runner.temp }}/shard-build/source.tar
+            ${{ runner.temp }}/shard-build/build.json
+            ${{ runner.temp }}/shard-build/build.log
+            ${{ runner.temp }}/membership-handoff
+          if-no-files-found: warn
+          retention-days: 7

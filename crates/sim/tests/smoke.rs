@@ -10,6 +10,7 @@ fn sim_crate_links_against_raft_core() {
     assert_eq!(
         node.hard,
         HardState {
+            membership: None,
             current_term: 0,
             voted_for: None
         }

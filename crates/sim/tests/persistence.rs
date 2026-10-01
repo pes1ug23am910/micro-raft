@@ -46,6 +46,7 @@ fn persist_ordered_before_send() {
             msg: vote_request(1, 1),
         },
         Effect::PersistHardState(HardState {
+            membership: None,
             current_term: 1,
             voted_for: Some(1),
         }),
@@ -122,6 +123,7 @@ fn higher_term_is_durable_before_role_change() {
 fn malformed_append_entries_leaves_core_and_virtual_disk_untouched() {
     let mut sim = Sim::new(3, 93);
     let hard = HardState {
+        membership: None,
         current_term: 3,
         voted_for: Some(1),
     };
@@ -137,6 +139,7 @@ fn malformed_append_entries_leaves_core_and_virtual_disk_untouched() {
         2,
         1,
         RaftMessage::AppendEntries {
+            contact_round: 0,
             term: 9,
             leader_id: 2,
             prev_log_index: 0,
@@ -161,6 +164,7 @@ fn malformed_append_entries_leaves_core_and_virtual_disk_untouched() {
         vec![Effect::Send {
             to: 2,
             msg: RaftMessage::AppendEntriesReply {
+                contact_round: 0,
                 term: 3,
                 success: false,
                 match_index: 1,
@@ -172,6 +176,7 @@ fn malformed_append_entries_leaves_core_and_virtual_disk_untouched() {
 #[test]
 fn no_double_vote_after_crash_restart() {
     let hard = HardState {
+        membership: None,
         current_term: 5,
         voted_for: None,
     };
